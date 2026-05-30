@@ -38,3 +38,6 @@ jieba>=0.42.0
 # ---------- Knowledge Base Document Parsing ----------
 pypdf>=3.0.0
 python-docx>=0.8.0
+
+# ---------- Testing ----------
+pytest>=7.0.0

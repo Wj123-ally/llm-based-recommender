@@ -11,59 +11,16 @@ from typing import Any
 
 from langchain_core.documents import Document
 
-import config as settings
 from src.knowledge_base.document_processor import KNOWLEDGE_COLLECTION_NAME
+from src.shared import create_chroma_collection
 
 logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
-def _get_embedding_model() -> Any:
-    """延迟加载 embedding 模型。"""
-    import os
-    import time
-
-    if not os.getenv("DASHSCOPE_API_KEY"):
-        raise EnvironmentError("请先设置环境变量 DASHSCOPE_API_KEY")
-
-    last_error: Exception | None = None
-    for attempt in range(1, 4):
-        try:
-            try:
-                from langchain_community.embeddings import DashScopeEmbeddings
-            except ImportError:
-                from langchain_dashscope import DashScopeEmbeddings
-
-            try:
-                return DashScopeEmbeddings(model=settings.DASHSCOPE_EMBEDDING_MODEL)
-            except TypeError:
-                return DashScopeEmbeddings(
-                    model_name=settings.DASHSCOPE_EMBEDDING_MODEL
-                )
-        except Exception as exc:
-            last_error = exc
-            logger.warning("初始化 embedding 失败，第 %s 次重试", attempt)
-            if attempt < 3:
-                time.sleep(2)
-
-    raise RuntimeError("初始化 embedding 模型失败") from last_error
-
-
-@lru_cache(maxsize=1)
 def _get_knowledge_chroma() -> Any:
     """获取知识库 Chroma collection。"""
-    try:
-        from langchain_chroma import Chroma
-    except ImportError:
-        from langchain_community.vectorstores import Chroma
-
-    persist_dir = str(settings.CHROMA_INDEX_PATH)
-
-    return Chroma(
-        collection_name=KNOWLEDGE_COLLECTION_NAME,
-        embedding_function=_get_embedding_model(),
-        persist_directory=persist_dir,
-    )
+    return create_chroma_collection(KNOWLEDGE_COLLECTION_NAME)
 
 
 def retrieve_knowledge(

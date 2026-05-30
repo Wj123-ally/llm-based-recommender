@@ -1,12 +1,10 @@
 import logging
-import os
 import pickle
 import sys
-import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from langchain_core.documents import Document
 
@@ -20,6 +18,7 @@ from src.retriever.product_documents import (  # noqa: E402
     chinese_tokenize,
     get_document_key,
 )
+from src.shared import create_chroma_collection  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
@@ -35,53 +34,8 @@ class RetrievalCandidate:
 
 
 @lru_cache(maxsize=1)
-def initialize_embeddings_model():
-    if not os.getenv("DASHSCOPE_API_KEY"):
-        raise EnvironmentError("请先设置环境变量 DASHSCOPE_API_KEY")
-
-    last_error: Exception | None = None
-
-    for attempt in range(1, 4):
-        try:
-            try:
-                from langchain_community.embeddings import DashScopeEmbeddings
-            except ImportError:
-                from langchain_dashscope import DashScopeEmbeddings
-
-            try:
-                return DashScopeEmbeddings(model=settings.DASHSCOPE_EMBEDDING_MODEL)
-            except TypeError:
-                return DashScopeEmbeddings(
-                    model_name=settings.DASHSCOPE_EMBEDDING_MODEL
-                )
-        except Exception as exc:
-            last_error = exc
-            logger.warning("初始化 DashScope embedding 失败，第 %s 次重试", attempt)
-            if attempt < 3:
-                time.sleep(2)
-
-    raise RuntimeError("初始化 DashScope embedding 模型失败") from last_error
-
-
-@lru_cache(maxsize=1)
 def load_chroma_index():
-    try:
-        from langchain_chroma import Chroma
-    except ImportError:
-        from langchain_community.vectorstores import Chroma
-
-    vectorstore = Chroma(
-        collection_name=settings.CHROMA_COLLECTION_NAME,
-        embedding_function=initialize_embeddings_model(),
-        persist_directory=str(settings.CHROMA_INDEX_PATH),
-    )
-
-    try:
-        logger.info("Chroma 向量库文档数量：%s", vectorstore._collection.count())
-    except Exception:
-        logger.exception("读取 Chroma 文档数量失败")
-
-    return vectorstore
+    return create_chroma_collection(settings.CHROMA_COLLECTION_NAME)
 
 
 @lru_cache(maxsize=1)
@@ -274,19 +228,6 @@ def create_bm25_payload(documents: list[Document]) -> dict[str, Any]:
         ],
         "tokenizer": "jieba_or_cjk_fallback",
     }
-
-
-def retriever_flow(
-    weights: Optional[list[float]] = None,
-    k: int = 20,
-    top_n: int = 5,
-    save_path: Optional[Path] = None,
-):
-    logger.info(
-        "Runtime hybrid retriever uses Chroma + BM25 + Cross-Encoder; "
-        "weights/save_path are kept only for compatibility."
-    )
-    return retrieve_products
 
 
 def _with_retrieval_metadata(candidate: RetrievalCandidate) -> Document:

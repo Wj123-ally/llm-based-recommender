@@ -9,13 +9,13 @@
 """
 
 import logging
-import os
 from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from src.recommender.state import RecState
+from src.shared import create_chat_llm
 
 logger = logging.getLogger(__name__)
 
@@ -35,19 +35,6 @@ class UserIntent(BaseModel):
     analysis: str = Field(
         description="用一句话解释你的分析判断，说明用户意图属于哪种类型，"
         "以及为什么需要/不需要商品推荐和知识库资料。"
-    )
-
-
-def create_llm():
-    """创建用于意图分析的 LLM。"""
-    try:
-        from langchain_community.chat_models import ChatTongyi
-    except ImportError:
-        from langchain_community.chat_models.tongyi import ChatTongyi
-
-    return ChatTongyi(
-        model=os.getenv("DASHSCOPE_CHAT_MODEL", "qwen-plus"),
-        temperature=0,
     )
 
 
@@ -90,7 +77,7 @@ def analyze_intent_node(state: RecState) -> RecState:
 """
 
     try:
-        llm = create_llm()
+        llm = create_chat_llm(temperature=0)
         structured_llm = llm.with_structured_output(UserIntent)
         result = structured_llm.invoke(
             [

@@ -131,18 +131,9 @@ def initialize_embeddings_model():
 
     后续 FAISS 和 Chroma 都需要用这个模型生成向量。
     """
-    if not os.getenv("DASHSCOPE_API_KEY"):
-        raise EnvironmentError("请先设置环境变量 DASHSCOPE_API_KEY")
+    from src.shared import create_embedding_model
 
-    try:
-        from langchain_community.embeddings import DashScopeEmbeddings
-    except ImportError:
-        from langchain_dashscope import DashScopeEmbeddings
-
-    try:
-        return DashScopeEmbeddings(model=DASHSCOPE_EMBEDDING_MODEL)
-    except TypeError:
-        return DashScopeEmbeddings(model_name=DASHSCOPE_EMBEDDING_MODEL)
+    return create_embedding_model()
 
 
 def create_faiss_index(embeddings, documents: list) -> None:

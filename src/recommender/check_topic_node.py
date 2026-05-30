@@ -5,6 +5,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from src.recommender.state import RecState
+from src.shared import create_chat_llm
 
 
 class TopicGrade(BaseModel):
@@ -15,23 +16,6 @@ class TopicGrade(BaseModel):
     # 只能返回 Yes 或 No
     score: Literal["Yes", "No"] = Field(
         description="用户问题是否和服装、鞋包、穿搭、配饰、商品推荐、洗护保养、面料材质、尺码选购相关"
-    )
-
-
-def create_llm():
-    """
-    创建 DashScope / 通义千问兼容的 LangChain 聊天模型。
-
-    后续如果需要更换模型，只需要修改这个函数。
-    """
-    try:
-        from langchain_community.chat_models import ChatTongyi
-    except ImportError:
-        from langchain_community.chat_models.tongyi import ChatTongyi
-
-    return ChatTongyi(
-        model=os.getenv("DASHSCOPE_CHAT_MODEL", "qwen-plus"),
-        temperature=0,
     )
 
 
@@ -59,7 +43,7 @@ def check_topic_node(state: RecState) -> RecState:
 你只做主题判断，不要回答用户问题，不要推荐商品，不要解释原因。
 """
 
-    llm = create_llm()
+    llm = create_chat_llm(temperature=0)
     structured_llm = llm.with_structured_output(TopicGrade)
 
     result = structured_llm.invoke(

@@ -4,7 +4,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 INDEXING_DIR = PROJECT_ROOT / "src" / "indexing"
 DATA_DIR = INDEXING_DIR / "data"
-MODULE_IMPORT_NAME = "src.indexing.embedding"
 
 RAW_DATA_PATH = DATA_DIR / "products.csv"
 PROCESSED_DATA_PATH = DATA_DIR / "processed_products.csv"

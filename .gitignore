@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+
+*.log
+
+uploads/
+
+.env
+venv/
+.venv/
+
+# 预构建索引和数据集（文件较大，不适合 Git 追踪）
+src/indexing/indexes/
+src/indexing/data/
+
+# 运行时产生的聊天记录
+src/ui/chat_memory.json

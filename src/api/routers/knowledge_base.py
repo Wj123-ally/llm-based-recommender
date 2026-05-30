@@ -1,6 +1,8 @@
+import logging
 from email.parser import BytesParser
 from email.policy import default
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -8,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from src.knowledge_base.file_store import (
     ALLOWED_EXTENSIONS,
+    PROJECT_ROOT,
     DuplicateFileError,
     check_md5,
     delete_uploaded_file,
@@ -16,6 +19,8 @@ from src.knowledge_base.file_store import (
     save_upload_file,
     upload_by_str,
 )
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/knowledge", tags=["Knowledge Base"])
@@ -108,6 +113,28 @@ async def upload_files(request: Request) -> dict[str, list[dict[str, Any]]]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # 文件保存成功后，异步索引到知识库
+    # 索引失败不影响上传成功，仅记录警告
+    for entry in saved_files:
+        try:
+            file_path = PROJECT_ROOT / entry["saved_path"]
+            from src.knowledge_base.document_processor import index_file
+
+            chunk_count = index_file(
+                file_path=file_path,
+                file_id=entry["file_id"],
+                filename=entry["original_filename"],
+            )
+            entry["indexed_chunks"] = chunk_count
+        except ImportError as exc:
+            logger.warning(
+                "文件 %s 索引失败（缺少依赖）：%s", entry["original_filename"], exc
+            )
+        except Exception:
+            logger.exception(
+                "文件 %s 索引失败，文件本身已保存", entry["original_filename"]
+            )
+
     return {"files": saved_files}
 
 
@@ -121,5 +148,16 @@ def delete_file(file_id: str) -> dict[str, Any]:
     deleted = delete_uploaded_file(file_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="文件不存在")
+
+    # 同步清理知识库索引
+    try:
+        from src.knowledge_base.document_processor import delete_file_index
+
+        deleted_chunks = delete_file_index(file_id)
+        logger.info("文件 %s 已删除，清理了 %s 条索引", file_id, deleted_chunks)
+    except ImportError:
+        logger.warning("文件 %s 已删除，但缺少索引清理依赖", file_id)
+    except Exception:
+        logger.exception("清理文件 %s 的知识库索引失败", file_id)
 
     return {"file_id": file_id, "deleted": True}

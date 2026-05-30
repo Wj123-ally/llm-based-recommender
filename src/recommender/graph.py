@@ -1,3 +1,4 @@
+import logging
 import sys
 from pathlib import Path
 
@@ -8,6 +9,8 @@ from src.recommender.check_topic_node import check_topic_node
 from src.recommender.rag_node import rag_recommender
 from src.recommender.self_query_node import self_query_retrieve
 from src.recommender.state import RecState
+
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -21,11 +24,35 @@ def route_after_topic_check(state: RecState) -> str:
     return END
 
 
+def knowledge_retrieve_node(state: RecState) -> RecState:
+    """
+    LangGraph 知识库检索节点。
+
+    从用户上传的知识库文件中检索与 query 相关的文档片段。
+    如果知识库为空或检索失败，不影响后续流程。
+    """
+    try:
+        from src.knowledge_base.knowledge_retriever import retrieve_knowledge
+
+        knowledge_docs = retrieve_knowledge(state["query"])
+        state["knowledge_docs"] = knowledge_docs
+        return state
+    except ImportError:
+        logger.warning("知识检索模块不可用，跳过")
+        state["knowledge_docs"] = ""
+        return state
+    except Exception:
+        logger.exception("知识库检索失败，跳过")
+        state["knowledge_docs"] = ""
+        return state
+
+
 def create_recommender_graph():
     workflow = StateGraph(RecState)
 
     workflow.add_node("check_topic", check_topic_node)
     workflow.add_node("hybrid_retrieve", self_query_retrieve)
+    workflow.add_node("knowledge_retrieve", knowledge_retrieve_node)
     workflow.add_node("rag_recommender", rag_recommender)
 
     workflow.set_entry_point("check_topic")
@@ -38,7 +65,8 @@ def create_recommender_graph():
             END: END,
         },
     )
-    workflow.add_edge("hybrid_retrieve", "rag_recommender")
+    workflow.add_edge("hybrid_retrieve", "knowledge_retrieve")
+    workflow.add_edge("knowledge_retrieve", "rag_recommender")
     workflow.add_edge("rag_recommender", END)
 
     memory = MemorySaver()

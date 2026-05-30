@@ -58,10 +58,11 @@ def rag_recommender(state: RecState) -> RecState:
     """
     LangGraph 推荐生成节点。
 
-    只负责基于 query 和 products 生成最终推荐回答。
+    基于 query、products 和 knowledge_docs 生成最终推荐回答。
     """
     query = state["query"]
     products = state.get("products", "")
+    knowledge_docs = state.get("knowledge_docs", "")
 
     if not products:
         state["recommendation"] = (
@@ -75,6 +76,7 @@ def rag_recommender(state: RecState) -> RecState:
             {
                 "query": query,
                 "docs": products,
+                "knowledge": knowledge_docs if knowledge_docs else "暂无相关知识资料。",
             }
         )
 

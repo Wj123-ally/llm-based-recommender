@@ -99,10 +99,14 @@ def create_rag_template() -> PromptTemplate:
 商品资料：
 {docs}
 
-请用自然、简洁的中文给出推荐回答。
+相关知识：
+{knowledge}
+
+请结合商品资料和相关知识，用自然、简洁的中文给出推荐回答。
+如果提供了相关知识，请参考其中的穿搭建议、风格指南或产品知识来辅助推荐说明。
 """
 
     return PromptTemplate(
         template=template,
-        input_variables=["docs", "query"],
+        input_variables=["docs", "query", "knowledge"],
     )

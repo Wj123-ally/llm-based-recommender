@@ -34,3 +34,7 @@ datasets>=2.14.0
 
 # ---------- Chinese Tokenization ----------
 jieba>=0.42.0
+
+# ---------- Knowledge Base Document Parsing ----------
+pypdf>=3.0.0
+python-docx>=0.8.0

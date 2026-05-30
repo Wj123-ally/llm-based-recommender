@@ -21,6 +21,9 @@ class RecState(TypedDict, total=False):
     # 后续检索到的商品文本
     products: str
 
+    # 从知识库检索到的相关文档片段
+    knowledge_docs: str
+
     # 后续检索到的原始文档信息，用于展示标题、图片、类目等 metadata
     documents: list[dict[str, Any]]
 

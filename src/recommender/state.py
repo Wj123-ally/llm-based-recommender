@@ -12,6 +12,9 @@ class RecState(TypedDict, total=False):
     # 用户输入的原始问题
     query: str
 
+    # 上一轮对话的 query，用于理解追问（如"我要女性的"）
+    previous_query: str
+
     # 主题判断结果：Yes 表示和服装相关，No 表示不相关
     on_topic: Literal["Yes", "No"]
 

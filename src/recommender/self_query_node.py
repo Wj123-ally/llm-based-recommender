@@ -50,10 +50,12 @@ def self_query_retrieve(state: RecState) -> RecState:
     """
     query = state["query"]
     need_products = state.get("need_products", True)
+    previous_query = state.get("previous_query", "")
 
     logger.info("-" * 50)
     logger.info("[商品检索] 开始")
     logger.info("[商品检索] 查询语句: %s", query)
+    logger.info("[商品检索] 上一轮 query: %s", previous_query or "(无)")
     logger.info("[商品检索] 是否需要商品: %s", need_products)
 
     # 意图分析判定不需要商品，直接跳过
@@ -66,11 +68,26 @@ def self_query_retrieve(state: RecState) -> RecState:
         logger.info("-" * 50)
         return state
 
+    # ── 追问检测：当前 query 太短且上一轮有上下文时，合并搜索词 ──
+    search_query = query
+    if previous_query and len(query.strip()) < 15:
+        # 当前 query 像一个追问/过滤条件，不是独立的新问题
+        search_query = f"{previous_query} {query}"
+        logger.info("[商品检索] 检测到追问 → 合并搜索词: %s", search_query)
+
     # 执行混合检索
     try:
-        from src.retriever.hybrid_retriever import retrieve_products
+        from src.retriever.hybrid_retriever import (
+            parse_query_filters,
+            retrieve_products,
+        )
 
-        results = retrieve_products(query)
+        # 从原始 query 提取过滤条件，但从合并后的 search_query 做语义搜索
+        filters = parse_query_filters(query)
+        if filters:
+            logger.info("[商品检索] 解析到过滤条件: %s", filters)
+
+        results = retrieve_products(search_query, filters=filters if filters else None)
 
         if not results:
             logger.info("[商品检索] 结果: 未找到匹配商品")
@@ -92,11 +109,12 @@ def self_query_retrieve(state: RecState) -> RecState:
             title = doc.metadata.get("title", doc.metadata.get("商品标题", "-"))
             meta = doc.metadata.get("_retrieval", {})
             logger.debug(
-                "[商品检索]   #%s: %s | chroma=%.3f bm25=%s rerank=%.3f",
+                "[商品检索]   #%s: %s | chroma=%.3f bm25=%s rrf=%.4f rerank=%.3f",
                 i,
                 title[:50],
                 meta.get("chroma_score") or 0,
                 meta.get("bm25_score") or "-",
+                meta.get("rrf_score") or 0,
                 meta.get("rerank_score") or 0,
             )
 

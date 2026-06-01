@@ -49,10 +49,12 @@ def analyze_intent_node(state: RecState) -> RecState:
     日志记录完整的分析过程和结果。
     """
     query = state["query"]
+    previous_query = state.get("previous_query", "")
 
     logger.info("=" * 60)
     logger.info("[意图分析] 开始分析用户问题")
     logger.info("[意图分析] 用户问题: %s", query)
+    logger.info("[意图分析] 上一轮 query: %s", previous_query or "(无)")
 
     system_prompt = """
 你是一个服装推荐系统的意图分析器。
@@ -63,6 +65,7 @@ def analyze_intent_node(state: RecState) -> RecState:
    - 用户明确要求推荐商品（如"推荐一件羽绒服"）
    - 用户描述需求场景希望获得购买建议（如"冬天通勤穿什么"）
    - 用户想要对比或选择商品
+   - 用户对上一轮推荐结果进行追问或追加条件（如"我要女性的"、"有没有便宜点的"）
 
 2. 知识资料需求：
    - 用户询问洗护方法（如"怎么洗"、"如何保养"）
@@ -73,8 +76,22 @@ def analyze_intent_node(state: RecState) -> RecState:
 对于每个用户问题，你需要判断它是否需要商品推荐、是否需要知识资料。
 两者可以同时存在（如"推荐一件睡衣，顺便告诉我怎么洗护"）。
 
+重要：如果用户的问题是简短的追问（如"我要女性的"、"男款有吗"），
+请结合整个对话历史判断意图，而不仅仅是字面意思。
+这类追问通常意味着用户对上一轮的推荐结果不满意或想要细化条件。
+
 注意：你只做意图判断，不要回答用户问题。
 """
+
+    # 构建 user message：如果有上一轮上下文，一并传给 LLM
+    if previous_query:
+        user_message = (
+            f"上一轮用户问题：{previous_query}\n"
+            f"当前用户追问：{query}\n\n"
+            f"请结合上下文判断当前追问的意图。"
+        )
+    else:
+        user_message = f"分析以下用户问题的意图：{query}"
 
     try:
         llm = create_chat_llm(temperature=0)
@@ -82,7 +99,7 @@ def analyze_intent_node(state: RecState) -> RecState:
         result = structured_llm.invoke(
             [
                 SystemMessage(content=system_prompt),
-                HumanMessage(content=f"分析以下用户问题的意图：{query}"),
+                HumanMessage(content=user_message),
             ]
         )
 

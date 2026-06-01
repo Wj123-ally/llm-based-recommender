@@ -118,6 +118,38 @@ def generate_documents(use_csv_loader: bool = False) -> list:
     return documents
 
 
+def generate_documents_from_db() -> list:
+    """
+    从 SQLite 数据库读取商品数据，转换成 LangChain Document。
+
+    优先使用此函数 —— 数据库中的商品已包含价格/品牌/材质等增强字段。
+    """
+    from langchain_core.documents import Document
+    from src.database.product_repo import ProductRepo
+
+    repo = ProductRepo()
+    conn = repo.conn
+
+    rows = conn.execute(
+        "SELECT * FROM products ORDER BY id"
+    ).fetchall()
+
+    documents = []
+    for row in rows:
+        metadata = dict(row)
+        product_id = str(metadata.get("id", ""))
+        content = metadata.get("content_text", "") or build_product_content(metadata)
+        documents.append(
+            Document(
+                page_content=content,
+                metadata=metadata,
+                id=product_id,
+            )
+        )
+
+    return documents
+
+
 def initialize_embeddings_model():
     """
     初始化 DashScope embedding 模型。
@@ -149,21 +181,43 @@ def create_faiss_index(embeddings, documents: list) -> None:
 def create_chroma_index(embeddings, documents: list) -> None:
     """
     创建并保存 Chroma 向量库。
+
+    注意：只重建商品 collection，不删除知识库 collection。
+    如果知识库 collection 存在，会被保留。
     """
     try:
         from langchain_chroma import Chroma
     except ImportError:
         from langchain_community.vectorstores import Chroma
 
+    # 先打开现有 vector store，只删除商品 collection
     if CHROMA_INDEX_PATH.exists():
-        shutil.rmtree(CHROMA_INDEX_PATH)
+        try:
+            existing = Chroma(
+                collection_name=CHROMA_COLLECTION_NAME,
+                embedding_function=embeddings,
+                persist_directory=str(CHROMA_INDEX_PATH),
+            )
+            existing.delete_collection()
+        except Exception:
+            pass
 
     vector_store = Chroma(
         collection_name=CHROMA_COLLECTION_NAME,
         embedding_function=embeddings,
         persist_directory=str(CHROMA_INDEX_PATH),
     )
-    vector_store.add_documents(documents)
+
+    # Chroma 写入分批：每批 500 条，避免 embedding API 单次包太大超时
+    BATCH_SIZE = 500
+    total = len(documents)
+    for start in range(0, total, BATCH_SIZE):
+        end = min(start + BATCH_SIZE, total)
+        batch = documents[start:end]
+        # ids 参数帮助 Chroma 去重写入
+        batch_ids = [doc.metadata.get("id", f"prod_{start+i}") for i, doc in enumerate(batch)]
+        vector_store.add_documents(batch, ids=batch_ids)
+        print(f"  Chroma 写入进度: {end}/{total}")
 
     if hasattr(vector_store, "persist"):
         vector_store.persist()
@@ -188,32 +242,68 @@ def create_bm25_index(documents: list) -> None:
         pickle.dump(bm25_index, f)
 
 
-def embedding_pipeline(n_samples: Optional[int] = 100) -> None:
+def embedding_pipeline(
+    n_samples: Optional[int] = 100,
+    from_db: bool = False,
+) -> None:
     """
     整个离线索引构建流程的入口函数。
 
     完整流程：
     1. 如果原始 CSV 不存在，则从 Hugging Face Datasets 下载数据
-    2. 加载并预处理数据
+    2. 加载并预处理数据（或从 SQLite 读取增强数据）
     3. 把商品数据转换成 Document
     4. 初始化 DashScope embedding 模型
-    5. 创建 FAISS 向量索引
-    6. 创建 BM25 关键词索引
-    7. 创建 Chroma 向量库
+    5. 创建 Chroma 向量索引（稠密检索）
+    6. 创建 BM25 关键词索引（稀疏检索）
+
+    Args:
+        n_samples: 采样条数（from_db=False 时生效）
+        from_db: True 时从 SQLite 读取增强后商品数据
     """
     try:
+        if from_db:
+            print("[3/6] 从 SQLite 数据库读取商品...")
+            documents = generate_documents_from_db()
+            print(f"  共生成 {len(documents)} 条 Document")
+
+            print("[4/6] 初始化 embedding 模型...")
+            embeddings = initialize_embeddings_model()
+
+            print("[5/6] 创建 Chroma 向量索引（调用 DashScope embedding API，请耐心等待）...")
+            create_chroma_index(embeddings, documents)
+            print("  Chroma 索引创建完成")
+
+            print("[6/6] 创建 BM25 关键词索引...")
+            create_bm25_index(documents)
+            print("  BM25 索引创建完成")
+
+            print("Embedding pipeline completed successfully (from DB).")
+            return
+
         if not RAW_DATA_PATH.exists():
             from src.indexing.data_loader import download_data
 
+            print("[1/6] 下载原始数据...")
             download_data()
 
+        print(f"[2/6] 加载并预处理数据 (n_samples={n_samples})...")
         load_and_preprocess_data(n_samples)
+
+        print("[3/6] 转换为 LangChain Document...")
         documents = generate_documents()
+        print(f"  共生成 {len(documents)} 条 Document")
+
+        print("[4/6] 初始化 embedding 模型...")
         embeddings = initialize_embeddings_model()
 
-        create_faiss_index(embeddings, documents)
-        create_bm25_index(documents)
+        print("[5/6] 创建 Chroma 向量索引（调用 DashScope embedding API，请耐心等待）...")
         create_chroma_index(embeddings, documents)
+        print("  Chroma 索引创建完成")
+
+        print("[6/6] 创建 BM25 关键词索引...")
+        create_bm25_index(documents)
+        print("  BM25 索引创建完成")
 
         print("Embedding pipeline completed successfully.")
     except Exception as e:
@@ -221,4 +311,4 @@ def embedding_pipeline(n_samples: Optional[int] = 100) -> None:
         raise
 
 if __name__ == "__main__":
-    embedding_pipeline(n_samples=2000)
+    embedding_pipeline(from_db=True)

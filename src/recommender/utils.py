@@ -69,7 +69,7 @@ ATTRIBUTE_INFO = [
     ),
 ]
 
-DOC_CONTENT = "中文电商服装商品资料，包含商品标题、类目、风格、季节、材质、人群和属性描述。"
+DOC_CONTENT = "电商服装商品资料，包含商品标题、类目、风格、季节、材质、人群和属性描述。"
 
 
 def get_metadata_info():
@@ -81,7 +81,7 @@ def get_metadata_info():
 
 def create_rag_template() -> PromptTemplate:
     """
-    创建中文服装推荐 RAG prompt 模板。
+    创建服装推荐 RAG prompt 模板。
 
     核心设计：明确区分两个信息来源的职责。
 
@@ -100,7 +100,7 @@ def create_rag_template() -> PromptTemplate:
         - 应结合上一轮主题进行回答
     """
     template = """
-你是一个中文服装导购助手。你的回答基于两个相互独立的信息来源，请严格按照各自来源的职责使用它们。
+你是一个服装导购助手。你的回答基于两个相互独立的信息来源，请严格按照各自来源的职责使用它们。
 
 ━━━━━━━━━━ 对话上下文 ━━━━━━━━━━
 

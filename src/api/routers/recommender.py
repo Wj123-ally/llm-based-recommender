@@ -36,7 +36,7 @@ def recommend(
     thread_id: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
     """
-    中文服装推荐接口。
+    服装推荐接口。
     """
     if graph_app is None:
         raise HTTPException(status_code=503, detail="推荐服务暂时不可用")

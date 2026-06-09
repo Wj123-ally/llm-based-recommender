@@ -344,7 +344,7 @@ def send_question(question: str) -> None:
 
 init_memory_state()
 
-st.title("中文服装智能推荐")
+st.title("服装智能推荐")
 st.write("输入你的穿搭需求，我会根据商品库为你推荐合适的服装。")
 
 render_sidebar()

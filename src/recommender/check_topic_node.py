@@ -27,7 +27,7 @@ def check_topic_node(state: RecState) -> RecState:
     previous_query = state.get("previous_query", "")
 
     system_prompt = """
-你是一个中文服装推荐系统的主题判断器。
+你是一个服装推荐系统的主题判断器。
 
 你的任务是判断用户问题是否和以下主题相关：
 - 服装、鞋包、配饰

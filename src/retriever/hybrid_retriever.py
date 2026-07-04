@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import pickle
 import sys
@@ -18,31 +20,41 @@ from src.retriever.product_documents import (  # noqa: E402
     chinese_tokenize,
     get_document_key,
 )
-from src.shared import create_chroma_collection  # noqa: E402
-
+from src.shared import create_embedding_model  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+KNOWN_SHOE_TYPES = {
+    "网鞋",
+    "皮鞋",
+    "单鞋",
+    "乐福鞋",
+    "运动鞋",
+    "跑步鞋",
+    "凉鞋",
+    "拖鞋",
+    "板鞋",
+    "帆布鞋",
+    "靴子",
+    "马丁靴",
+    "高跟鞋",
+}
 
 
 @dataclass
 class RetrievalCandidate:
     document: Document
     sources: set[str] = field(default_factory=set)
-    chroma_score: float | None = None
+    dense_score: float | None = None
     bm25_score: float | None = None
+    multimodal_score: float | None = None
     rrf_score: float | None = None
     rerank_score: float | None = None
 
 
 @lru_cache(maxsize=1)
-def load_chroma_index():
-    """
-    从磁盘加载 Chroma 向量索引。
-
-    使用 DashScope embedding 模型初始化，与索引构建时保持一致。
-    Chroma 索引在 embedding_pipeline 中构建并保存到 CHROMA_INDEX_PATH。
-    """
-    return create_chroma_collection(settings.CHROMA_COLLECTION_NAME)
+def load_dense_embedding_model() -> Any:
+    return create_embedding_model()
 
 
 @lru_cache(maxsize=1)
@@ -62,62 +74,52 @@ def load_bm25_index() -> Any:
             "version": payload.get("version", 2),
         }
 
-    logger.warning("检测到旧版 BM25 索引，建议重新运行 embedding_pipeline 生成分词索引")
+    logger.warning("Detected legacy BM25 index; rebuild with embedding.py")
     return payload
 
 
 @lru_cache(maxsize=1)
-def load_cross_encoder():
+def load_cross_encoder() -> Any:
     from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 
     return HuggingFaceCrossEncoder(model_name=settings.CROSS_ENCODER_MODEL_NAME)
 
 
-def retrieve_from_chroma(query: str) -> list[RetrievalCandidate]:
-    """
-    使用 Chroma 进行稠密向量（语义）检索。
+def retrieve_from_dense_vectors(
+    query: str,
+    filters: dict[str, object] | None = None,
+) -> list[RetrievalCandidate]:
+    top_k = getattr(settings, "DENSE_RETRIEVER_TOP_K", 20)
+    search_top_k = _expanded_filter_top_k(top_k, filters)
+    threshold = getattr(settings, "DENSE_SIMILARITY_THRESHOLD", 0.2)
+    query_embedding = load_dense_embedding_model().embed_query(query)
 
-    Chroma 负责捕捉语义相似度 —— 例如用户查"秋冬通勤外套"，
-    能匹配到"加厚西装领大衣"这种关键词不完全一致但语义相近的商品。
-
-    选择 Chroma（而非 FAISS）的原因是：
-    - 未来计划换数据库、更新知识库，元数据字段会增加
-    - Chroma 原生支持 metadata filtering，扩展成本更低
-    - 知识库模块已使用 Chroma，统一存储降低维护成本
-    """
-    vectorstore = load_chroma_index()
-    top_k = getattr(settings, "CHROMA_RETRIEVER_TOP_K", 20)
-    threshold = getattr(settings, "CHROMA_SIMILARITY_THRESHOLD", 0.2)
-    results: list[tuple[Document, float | None]] = []
-
-    if hasattr(vectorstore, "similarity_search_with_relevance_scores"):
-        scored_docs = vectorstore.similarity_search_with_relevance_scores(
-            query,
-            k=top_k,
-        )
-        results = [
-            (document, float(score))
-            for document, score in scored_docs
-            if score is not None and float(score) >= threshold
-        ]
-    else:
-        documents = vectorstore.similarity_search(query, k=top_k)
-        results = [(document, None) for document in documents]
+    from src.retriever.milvus_store import search_documents
 
     candidates: list[RetrievalCandidate] = []
-    for document, score in results:
+    for document, score in search_documents(
+        settings.MILVUS_TEXT_COLLECTION_NAME,
+        query_embedding,
+        search_top_k,
+    ):
+        if score is not None and score < threshold:
+            continue
         candidates.append(
             RetrievalCandidate(
                 document=document,
-                sources={"chroma"},
-                chroma_score=score,
+                sources={"milvus_text"},
+                dense_score=score,
             )
         )
+    if filters:
+        candidates = apply_candidate_filters(candidates, filters)
+    return candidates[:top_k]
 
-    return candidates
 
-
-def retrieve_from_bm25(query: str) -> list[RetrievalCandidate]:
+def retrieve_from_bm25(
+    query: str,
+    filters: dict[str, object] | None = None,
+) -> list[RetrievalCandidate]:
     index = load_bm25_index()
     top_k = getattr(settings, "BM25_RETRIEVER_TOP_K", 20)
     min_score = getattr(settings, "BM25_MIN_SCORE", 0)
@@ -128,8 +130,16 @@ def retrieve_from_bm25(query: str) -> list[RetrievalCandidate]:
             return []
 
         scores = index["bm25"].get_scores(query_tokens)
+        documents = index["documents"]
+        eligible_indexes = range(len(scores))
+        if filters:
+            eligible_indexes = [
+                item
+                for item in eligible_indexes
+                if metadata_matches_filters(documents[item].metadata or {}, filters)
+            ]
         ranked_indexes = sorted(
-            range(len(scores)),
+            eligible_indexes,
             key=lambda item: scores[item],
             reverse=True,
         )
@@ -139,75 +149,94 @@ def retrieve_from_bm25(query: str) -> list[RetrievalCandidate]:
             score = float(scores[item])
             if score <= min_score:
                 continue
-
             candidates.append(
                 RetrievalCandidate(
-                    document=index["documents"][item],
+                    document=documents[item],
                     sources={"bm25"},
                     bm25_score=score,
                 )
             )
-
         return candidates
 
     if hasattr(index, "invoke"):
         index.k = top_k
-        return [
+        candidates = [
             RetrievalCandidate(document=document, sources={"bm25"})
             for document in index.invoke(query)
         ]
+        if filters:
+            candidates = apply_candidate_filters(candidates, filters)
+        return candidates
 
     raise TypeError(f"Unsupported BM25 index type: {type(index)!r}")
+
+
+def retrieve_from_multimodal_images(
+    query: str,
+    filters: dict[str, object] | None = None,
+) -> list[RetrievalCandidate]:
+    if not getattr(settings, "ENABLE_MULTIMODAL_RETRIEVER", False):
+        return []
+
+    try:
+        from src.retriever.multimodal_retriever import retrieve_from_product_images
+
+        top_k = getattr(settings, "MULTIMODAL_RETRIEVER_TOP_K", 20)
+        search_top_k = _expanded_filter_top_k(top_k, filters)
+        candidates = [
+            RetrievalCandidate(
+                document=document,
+                sources={"multimodal_image"},
+                multimodal_score=score,
+            )
+            for document, score in retrieve_from_product_images(query, top_k=search_top_k)
+        ]
+        if filters:
+            candidates = apply_candidate_filters(candidates, filters)
+        return candidates[:top_k]
+    except Exception as exc:
+        logger.warning("Multimodal image retriever unavailable; skipped: %s", exc)
+        return []
 
 
 def rrf_fusion(
     *candidate_groups: list[RetrievalCandidate],
     k: int | None = None,
 ) -> list[RetrievalCandidate]:
-    """
-    使用 RRF (Reciprocal Rank Fusion) 算法融合多个检索源的候选结果。
-
-    RRF 公式：RRF_score(d) = Σ_{r ∈ retrievers} 1 / (k + rank_r(d))
-
-    其中 k 是平滑常数（默认 60），rank_r(d) 是文档 d 在检索源 r
-    中的排名（1-indexed）。RRF 不依赖绝对分数，只依赖相对排名，
-    因此可以公平地融合 Chroma（余弦相似度）和 BM25（词频分数）两种
-    不同量纲的检索结果。
-
-    同文档在多个来源中出现时：
-    - RRF 分数累加（出现在多个来源且排名靠前的文档得分最高）
-    - 各路原始分数保留各自的最大值
-    - sources 取并集
-    """
     if k is None:
         k = getattr(settings, "RRF_K", 60)
 
     merged: dict[str, RetrievalCandidate] = {}
-
     for group in candidate_groups:
         for rank, candidate in enumerate(group, start=1):
             key = get_document_key(candidate.document)
-            rrf_contribution = 1.0 / (k + rank)
+            contribution = 1.0 / (k + rank)
             existing = merged.get(key)
-
             if existing is None:
-                candidate.rrf_score = rrf_contribution
+                candidate.rrf_score = contribution
                 merged[key] = candidate
-            else:
-                existing.rrf_score = (existing.rrf_score or 0) + rrf_contribution
-                existing.chroma_score = _max_optional(
-                    existing.chroma_score,
-                    candidate.chroma_score,
-                )
-                existing.bm25_score = _max_optional(
-                    existing.bm25_score,
-                    candidate.bm25_score,
-                )
-                existing.sources.update(candidate.sources)
+                continue
+
+            existing.rrf_score = (existing.rrf_score or 0) + contribution
+            existing.dense_score = _max_optional(
+                existing.dense_score,
+                candidate.dense_score,
+            )
+            existing.bm25_score = _max_optional(
+                existing.bm25_score,
+                candidate.bm25_score,
+            )
+            existing.multimodal_score = _max_optional(
+                existing.multimodal_score,
+                candidate.multimodal_score,
+            )
+            existing.sources.update(candidate.sources)
 
     return sorted(
         merged.values(),
-        key=lambda c: c.rrf_score if c.rrf_score is not None else float("-inf"),
+        key=lambda candidate: candidate.rrf_score
+        if candidate.rrf_score is not None
+        else float("-inf"),
         reverse=True,
     )
 
@@ -216,14 +245,6 @@ def rerank_candidates(
     query: str,
     candidates: list[RetrievalCandidate],
 ) -> list[RetrievalCandidate]:
-    """
-    使用 Cross-Encoder 对融合后的候选做细粒度语义重排。
-
-    Cross-Encoder 将 (query, document) 成对输入 Transformer，
-    输出相关性分数。相比双塔模型（Chroma embedding），Cross-Encoder
-    能捕捉 query-document 之间的细粒度交互，但计算成本更高，
-    因此只对 RRF 融合后的候选集（而非全量）进行重排。
-    """
     if not candidates:
         return []
 
@@ -254,21 +275,39 @@ def rerank_candidates(
 def retrieve_products(
     query: str,
     filters: dict[str, object] | None = None,
+    exclude_ids: list[str] | None = None,
 ) -> list[Document]:
     """
-    混合检索主入口：Chroma + BM25 → RRF 融合 → Cross-Encoder 重排。
+    执行混合检索（向量 + BM25 + 多模态），并返回排序后的商品文档。
 
-    流程：
-    1. Chroma 稠密检索 — 语义匹配（Top-K）
-    2. BM25 稀疏检索 — 关键词匹配（Top-K）
-    3. RRF 融合去重 — 基于排名融合，不依赖绝对分数
-    4. 元数据过滤 — SQL 叠加过滤（价格/品牌/材质/季节）
-    5. Cross-Encoder 重排 — 细粒度语义打分（Top-N）
-    6. 如果 Cross-Encoder 失败，回退到 RRF 分数排序
+    Args:
+        query: 查询字符串
+        filters: 结构化过滤条件（season, material, brand等）
+        exclude_ids: 需要排除的商品ID列表（用于避免重复推荐）
+
+    Returns:
+        排序后的商品文档列表
     """
-    chroma_candidates = retrieve_from_chroma(query)
-    bm25_candidates = retrieve_from_bm25(query)
-    candidates = rrf_fusion(chroma_candidates, bm25_candidates)
+    dense_candidates = retrieve_from_dense_vectors(query, filters)
+    bm25_candidates = retrieve_from_bm25(query, filters)
+    multimodal_candidates = retrieve_from_multimodal_images(query, filters)
+    candidates = rrf_fusion(dense_candidates, bm25_candidates, multimodal_candidates)
+    if filters:
+        candidates = apply_candidate_filters(candidates, filters)
+
+    # 排除已推荐的商品
+    if exclude_ids:
+        initial_count = len(candidates)
+        candidates = [
+            c for c in candidates
+            if c.document.metadata.get("id") not in exclude_ids
+        ]
+        if initial_count > len(candidates):
+            logger.info(
+                "[商品检索] 排除已推荐商品: 排除前%d个, 排除后%d个",
+                initial_count,
+                len(candidates)
+            )
 
     if not candidates:
         return []
@@ -276,119 +315,388 @@ def retrieve_products(
     try:
         ranked_candidates = rerank_candidates(query, candidates)
     except Exception:
-        logger.exception("Cross-Encoder 重排失败，回退到 RRF 分数排序")
+        logger.exception("Cross-Encoder rerank failed; falling back to RRF")
         ranked_candidates = sorted(
             candidates,
-            key=lambda c: c.rrf_score if c.rrf_score is not None else float("-inf"),
+            key=lambda item: item.rrf_score
+            if item.rrf_score is not None
+            else float("-inf"),
             reverse=True,
         )[: getattr(settings, "RERANK_TOP_N", 5)]
 
     docs = [_with_retrieval_metadata(candidate) for candidate in ranked_candidates]
-
-    # 元数据过滤
-    if filters:
+    if filters and _can_use_sql_filter(filters):
         docs = apply_metadata_filters(docs, filters)
-
     return docs
 
 
+def _can_use_sql_filter(filters: dict[str, object]) -> bool:
+    sql_filter_keys = {"brand", "material", "season"}
+    return bool(filters) and set(filters).issubset(sql_filter_keys)
+
+
+def _expanded_filter_top_k(
+    top_k: int,
+    filters: dict[str, object] | None,
+) -> int:
+    if not filters:
+        return top_k
+
+    multiplier = max(1, int(getattr(settings, "FILTERED_RECALL_MULTIPLIER", 5)))
+    min_k = max(top_k, int(getattr(settings, "FILTERED_RECALL_MIN_K", 100)))
+    max_k = max(min_k, int(getattr(settings, "FILTERED_RECALL_MAX_K", 200)))
+    return min(max(top_k * multiplier, min_k), max_k)
+
+
 def parse_query_filters(query: str) -> dict[str, object]:
-    """
-    从用户查询中提取结构化过滤条件。
-
-    使用规则 + 正则，不依赖 LLM。
-    支持的过滤维度：价格区间、品牌、材质、季节、性别。
-
-    Examples:
-        "300元以下的冬季外套" → {"price_max": 300, "season": "冬"}
-        "海澜之家衬衫500以内" → {"brand": "海澜之家", "price_max": 500}
-        "夏天穿的棉质连衣裙" → {"season": "夏", "material": "棉"}
-    """
-    import re
-
     filters: dict[str, object] = {}
 
-    # 价格：XXX元以下 / XXX以内 / XXX-XXX元 / XXX以下
-    price_below = re.search(r"(\d+)\s*元?\s*(?:以下|以内|内)", query)
-    if price_below:
-        filters["price_max"] = float(price_below.group(1))
-
-    price_above = re.search(r"(\d+)\s*元?\s*(?:以上|以上)", query)
-    if price_above:
-        filters["price_min"] = float(price_above.group(1))
-
-    price_range = re.search(r"(\d+)\s*[-~至到]\s*(\d+)\s*元?", query)
-    if price_range:
-        filters["price_min"] = float(price_range.group(1))
-        filters["price_max"] = float(price_range.group(2))
-
-    # 季节
     for keyword, season in [
-        ("春", "春"), ("夏", "夏"), ("秋", "秋"),
-        ("冬", "冬"), ("春夏", "春夏"), ("秋冬", "秋冬"),
-        ("春秋", "春秋"), ("夏天", "夏"), ("冬天", "冬"),
-        ("春季", "春"), ("夏季", "夏"), ("秋季", "秋"), ("冬季", "冬"),
+        ("春夏", "春夏"),
+        ("秋冬", "秋冬"),
+        ("春秋", "春秋"),
+        ("夏天", "夏"),
+        ("冬天", "冬"),
+        ("春季", "春"),
+        ("夏季", "夏"),
+        ("秋季", "秋"),
+        ("冬季", "冬"),
+        ("春", "春"),
+        ("夏", "夏"),
+        ("秋", "秋"),
+        ("冬", "冬"),
     ]:
         if keyword in query and "season" not in filters:
             filters["season"] = season
             break
 
-    # 品牌（从常见品牌库匹配）
-    COMMON_BRANDS = [
-        "伊芙丽", "太平鸟", "欧时力", "优衣库", "ZARA", "H&M",
-        "海澜之家", "七匹狼", "劲霸", "柒牌", "雅戈尔",
-        "百丽", "达芙妮", "红蜻蜓", "奥康", "NIKE", "Adidas",
-        "安踏", "李宁", "特步", "爱慕", "曼妮芬", "古今",
-        "巴拉巴拉", "江南布衣", "MO&Co", "地素", "ONLY",
-    ]
-    for brand in COMMON_BRANDS:
-        if brand.lower() in query.lower() and "brand" not in filters:
-            filters["brand"] = brand
-            break
-
-    # 材质
-    MATERIALS = [
-        "棉", "麻", "丝", "羊毛", "羊绒", "真丝", "雪纺",
-        "牛仔", "皮革", "皮", "羽绒", "羊皮", "牛皮",
-        "聚酯纤维", "莫代尔", "亚麻", "灯芯绒", "针织",
-    ]
-    for mat in sorted(MATERIALS, key=len, reverse=True):
+    for mat in sorted(
+        ["真皮", "牛皮", "羊皮", "皮革", "网面", "帆布", "绒面", "橡胶"],
+        key=len,
+        reverse=True,
+    ):
         if mat in query and "material" not in filters:
             filters["material"] = mat
             break
 
-    # 性别
-    if any(w in query for w in ["女", "女式", "女士", "女款"]):
+    if any(word in query for word in ["女", "女式", "女士", "女款"]):
         filters["gender"] = "女"
-    elif any(w in query for w in ["男", "男式", "男士", "男款"]):
+    elif any(word in query for word in ["男", "男式", "男士", "男款"]):
         filters["gender"] = "男"
 
+    include_colors = _parse_include_colors(query)
+    exclude_colors = _parse_exclude_colors(query)
+    if include_colors:
+        filters["include_colors"] = include_colors
+    if exclude_colors:
+        filters["exclude_colors"] = exclude_colors
+
+    include_shoe_types = _parse_include_shoe_types(query)
+    exclude_shoe_types = _parse_exclude_shoe_types(query)
+    if include_shoe_types:
+        filters["include_shoe_types"] = include_shoe_types
+    if exclude_shoe_types:
+        filters["exclude_shoe_types"] = exclude_shoe_types
+
     return filters
+
+
+def _parse_include_colors(query: str) -> list[str]:
+    color_groups: list[str] = []
+    if any(word in query for word in ["浅颜色", "浅色", "浅色系", "亮色", "清爽颜色"]):
+        color_groups.extend(
+            [
+                "白色",
+                "白",
+                "米色",
+                "米白",
+                "杏色",
+                "粉色",
+                "浅粉",
+                "浅蓝",
+                "浅灰",
+                "银色",
+                "香槟",
+                "卡其",
+            ]
+        )
+
+    for color in [
+        "白色",
+        "米色",
+        "米白",
+        "杏色",
+        "粉色",
+        "浅粉",
+        "浅蓝",
+        "浅灰",
+        "银色",
+        "卡其",
+        "灰色",
+        "蓝色",
+        "棕色",
+        "红色",
+    ]:
+        if color in query:
+            color_groups.append(color)
+
+    return _dedupe(color_groups)
+
+
+def _parse_exclude_colors(query: str) -> list[str]:
+    colors: list[str] = []
+    if any(
+        phrase in query
+        for phrase in [
+            "不要黑色",
+            "不要黑",
+            "不想要黑色",
+            "不想要黑",
+            "不是黑色",
+            "非黑色",
+            "排除黑色",
+            "不要黑色的",
+        ]
+    ):
+        colors.extend(["黑色", "黑"])
+
+    if any(word in query for word in ["浅颜色", "浅色", "浅色系"]):
+        colors.extend(["黑色", "黑", "深色", "深灰", "藏青", "深棕"])
+
+    return _dedupe(colors)
+
+
+def _parse_include_shoe_types(query: str) -> list[str]:
+    shoe_types = []
+    for shoe_type in sorted(KNOWN_SHOE_TYPES, key=len, reverse=True):
+        if shoe_type in query and not _is_negated(query, shoe_type):
+            shoe_types.append(shoe_type)
+    return _dedupe(shoe_types)
+
+
+def _parse_exclude_shoe_types(query: str) -> list[str]:
+    shoe_types = []
+    for shoe_type in sorted(KNOWN_SHOE_TYPES, key=len, reverse=True):
+        if _is_negated(query, shoe_type):
+            shoe_types.append(shoe_type)
+    return _dedupe(shoe_types)
+
+
+def _is_negated(query: str, value: str) -> bool:
+    if any(prefix + value in query for prefix in ["不要", "不想要", "不是", "非", "排除"]):
+        return True
+
+    start = query.find(value)
+    if start < 0:
+        return False
+
+    nearby_after = query[start + len(value) : start + len(value) + 5]
+    return any(
+        word in nearby_after
+        for word in ["太闷", "闷", "不适合", "不舒服", "不透气", "不太适合"]
+    )
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def apply_candidate_filters(
+    candidates: list[RetrievalCandidate],
+    filters: dict[str, object],
+) -> list[RetrievalCandidate]:
+    if not filters or not candidates:
+        return candidates
+
+    initial_count = len(candidates)
+    filtered: list[RetrievalCandidate] = []
+    for candidate in candidates:
+        metadata = candidate.document.metadata or {}
+        if not metadata_matches_filters(metadata, filters):
+            continue
+        filtered.append(candidate)
+
+    # 诊断日志：当过滤导致空结果时输出警告
+    if len(filtered) == 0 and initial_count > 0:
+        logger.warning(
+            "[过滤诊断] 所有%d个候选被过滤掉! 过滤条件: %s",
+            initial_count,
+            filters
+        )
+        # 采样输出前3个商品的相关字段帮助调试
+        for i, candidate in enumerate(candidates[:3], 1):
+            meta = candidate.document.metadata or {}
+            logger.warning(
+                "  候选商品%d: brand='%s', season='%s', material='%s', title='%s'",
+                i,
+                meta.get('brand', ''),
+                meta.get('season', ''),
+                meta.get('material', ''),
+                (meta.get('title', '') or '')[:40]
+            )
+    elif len(filtered) < initial_count:
+        logger.info(
+            "[过滤诊断] 过滤前: %d个候选, 过滤后: %d个候选, 过滤条件: %s",
+            initial_count,
+            len(filtered),
+            filters
+        )
+
+    return filtered
+
+
+def merge_product_filters(
+    llm_filters: dict[str, object] | None,
+    rule_filters: dict[str, object] | None,
+) -> dict[str, object]:
+    merged: dict[str, object] = {}
+
+    for source in [llm_filters or {}, rule_filters or {}]:
+        for key in ["gender", "brand", "material", "season"]:
+            value = source.get(key)
+            if value:
+                merged[key] = str(value)
+
+        for key in [
+            "include_colors",
+            "exclude_colors",
+            "include_shoe_types",
+            "exclude_shoe_types",
+        ]:
+            values = _coerce_filter_list(source.get(key))
+            if values:
+                merged[key] = _dedupe(_coerce_filter_list(merged.get(key)) + values)
+
+    _prefer_exclusions(merged, "include_colors", "exclude_colors")
+    _prefer_exclusions(merged, "include_shoe_types", "exclude_shoe_types")
+    _keep_known_shoe_types(merged, "include_shoe_types")
+    _keep_known_shoe_types(merged, "exclude_shoe_types")
+    return merged
+
+
+def _coerce_filter_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    return []
+
+
+def _prefer_exclusions(
+    filters: dict[str, object],
+    include_key: str,
+    exclude_key: str,
+) -> None:
+    excludes = set(_coerce_filter_list(filters.get(exclude_key)))
+    if not excludes:
+        return
+
+    includes = [
+        value
+        for value in _coerce_filter_list(filters.get(include_key))
+        if value not in excludes
+    ]
+    if includes:
+        filters[include_key] = includes
+    else:
+        filters.pop(include_key, None)
+
+
+def _keep_known_shoe_types(filters: dict[str, object], key: str) -> None:
+    values = [
+        value
+        for value in _coerce_filter_list(filters.get(key))
+        if value in KNOWN_SHOE_TYPES
+    ]
+    if values:
+        filters[key] = values
+    else:
+        filters.pop(key, None)
+
+
+def metadata_matches_filters(
+    metadata: dict[str, Any],
+    filters: dict[str, object],
+) -> bool:
+    gender = filters.get("gender")
+    if gender and not _metadata_contains_any(
+        metadata,
+        ["gender", "target_user", "title", "content_text"],
+        [str(gender)],
+    ):
+        return False
+
+    for key in ["brand", "material", "season"]:
+        value = filters.get(key)
+        if value and not _metadata_contains_any(metadata, [key], [str(value)]):
+            return False
+
+    include_colors = filters.get("include_colors")
+    if isinstance(include_colors, list) and include_colors:
+        if not _metadata_contains_any(
+            metadata,
+            ["color", "text_color", "image_color", "title", "content_text", "tags"],
+            [str(color) for color in include_colors],
+        ):
+            return False
+
+    exclude_colors = filters.get("exclude_colors")
+    if isinstance(exclude_colors, list) and exclude_colors:
+        if _metadata_contains_any(
+            metadata,
+            ["color", "text_color", "image_color", "title", "content_text", "tags"],
+            [str(color) for color in exclude_colors],
+        ):
+            return False
+
+    include_shoe_types = filters.get("include_shoe_types")
+    if isinstance(include_shoe_types, list) and include_shoe_types:
+        if not _metadata_contains_any(
+            metadata,
+            ["shoe_type", "category_l2", "category_l3", "category_l4", "title", "content_text", "tags"],
+            [str(shoe_type) for shoe_type in include_shoe_types],
+        ):
+            return False
+
+    exclude_shoe_types = filters.get("exclude_shoe_types")
+    if isinstance(exclude_shoe_types, list) and exclude_shoe_types:
+        if _metadata_contains_any(
+            metadata,
+            ["shoe_type", "category_l2", "category_l3", "category_l4", "title", "content_text", "tags"],
+            [str(shoe_type) for shoe_type in exclude_shoe_types],
+        ):
+            return False
+
+    return True
+
+
+def _metadata_contains_any(
+    metadata: dict[str, Any],
+    fields: list[str],
+    needles: list[str],
+) -> bool:
+    values = [str(metadata.get(field) or "") for field in fields]
+    haystack = " ".join(values).lower()
+    return any(needle and needle.lower() in haystack for needle in needles)
 
 
 def apply_metadata_filters(
     documents: list[Document],
     filters: dict[str, object],
 ) -> list[Document]:
-    """
-    在检索结果上叠加 SQL 元数据过滤。
-
-    通过 ProductRepo.filter_by_ids 利用 SQLite 的索引做高效过滤，
-    保留向量检索的语义相关性排序，只排除不符合条件的商品。
-
-    Args:
-        documents: 向量检索返回的 Document 列表（已排序）
-        filters: parse_query_filters 的输出
-
-    Returns:
-        过滤后的 Document 列表（保持原顺序）
-    """
     if not filters or not documents:
         return documents
 
-    doc_ids = [doc.metadata.get("id", "") for doc in documents]
-    doc_ids = [did for did in doc_ids if did]
-
+    doc_ids = [str(doc.metadata.get("id") or "") for doc in documents]
+    doc_ids = [doc_id for doc_id in doc_ids if doc_id]
     if not doc_ids:
         return documents
 
@@ -396,67 +704,37 @@ def apply_metadata_filters(
         from src.database.product_repo import ProductRepo
 
         repo = ProductRepo()
-
         filtered_rows = repo.filter_by_ids(
             product_ids=doc_ids,
-            price_min=float(filters["price_min"]) if "price_min" in filters else None,
-            price_max=float(filters["price_max"]) if "price_max" in filters else None,
             brand=str(filters["brand"]) if "brand" in filters else None,
             material=str(filters["material"]) if "material" in filters else None,
             season=str(filters["season"]) if "season" in filters else None,
             gender=str(filters["gender"]) if "gender" in filters else None,
         )
-
         kept_ids = {row["id"] for row in filtered_rows}
         return [doc for doc in documents if doc.metadata.get("id") in kept_ids]
 
     except Exception:
-        logger.exception("元数据过滤失败，返回未过滤结果")
+        logger.exception("Metadata filtering failed; returning unfiltered results")
         return documents
-
-
-def create_bm25_payload(documents: list[Document]) -> dict[str, Any]:
-    return {
-        "version": 2,
-        "documents": documents,
-        "tokenized_corpus": [
-            chinese_tokenize(document.page_content) for document in documents
-        ],
-        "tokenizer": "jieba_or_cjk_fallback",
-    }
 
 
 def _with_retrieval_metadata(candidate: RetrievalCandidate) -> Document:
     metadata = dict(candidate.document.metadata or {})
     metadata["_retrieval"] = {
         "sources": sorted(candidate.sources),
-        "chroma_score": candidate.chroma_score,
+        "dense_score": candidate.dense_score,
         "bm25_score": candidate.bm25_score,
+        "multimodal_score": candidate.multimodal_score,
         "rrf_score": candidate.rrf_score,
         "rerank_score": candidate.rerank_score,
     }
 
-    content = build_product_content(metadata) or candidate.document.page_content
     return Document(
-        page_content=content,
+        page_content=build_product_content(metadata) or candidate.document.page_content,
         metadata=metadata,
         id=getattr(candidate.document, "id", None),
     )
-
-
-def _fallback_rank(candidates: list[RetrievalCandidate]) -> list[RetrievalCandidate]:
-    return sorted(candidates, key=_fallback_score, reverse=True)
-
-
-def _fallback_score(candidate: RetrievalCandidate) -> float:
-    score = 0.0
-
-    if candidate.chroma_score is not None:
-        score += candidate.chroma_score
-    if candidate.bm25_score is not None:
-        score += candidate.bm25_score
-
-    return score
 
 
 def _max_optional(left: float | None, right: float | None) -> float | None:
@@ -464,12 +742,11 @@ def _max_optional(left: float | None, right: float | None) -> float | None:
         return right
     if right is None:
         return left
-
     return max(left, right)
 
 
 if __name__ == "__main__":
-    docs = retrieve_products("推荐一件适合秋冬通勤的外套")
+    docs = retrieve_products("推荐一双黑色通勤皮鞋")
     print("Retrieved documents:", len(docs))
     for doc in docs:
         print(doc.metadata.get("_retrieval"), doc.page_content[:120])

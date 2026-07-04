@@ -1,133 +1,73 @@
-from langchain_community.query_constructors.chroma import ChromaTranslator
-from langchain_core.structured_query import Comparator, Comparison
-
 try:
     from langchain.prompts import PromptTemplate
 except ImportError:
     from langchain_core.prompts import PromptTemplate
 
-try:
-    from langchain_classic.chains.query_constructor.schema import AttributeInfo
-except ImportError:
-    from langchain.chains.query_constructor.schema import AttributeInfo
-
-
-class CustomChromaTranslator(ChromaTranslator):
-    """
-    自定义 Chroma 查询转换器。
-
-    在保留 ChromaTranslator 默认能力的基础上，额外支持 LIKE。
-    """
-
-    allowed_comparators = [*ChromaTranslator.allowed_comparators, Comparator.LIKE]
-
-    def visit_comparison(self, comparison: Comparison) -> dict:
-        """
-        把 LIKE 转换成 Chroma 可执行的过滤条件。
-        """
-        if comparison.comparator == Comparator.LIKE:
-            return {comparison.attribute: {"$in": [comparison.value]}}
-
-        return super().visit_comparison(comparison)
-
-
-ATTRIBUTE_INFO = [
-    AttributeInfo(
-        name="title",
-        description="商品标题",
-        type="string",
-    ),
-    AttributeInfo(
-        name="industry",
-        description="行业，例如 服饰时尚",
-        type="string",
-    ),
-    AttributeInfo(
-        name="category1",
-        description="一级类目，例如 女装、男装、鞋靴、箱包",
-        type="string",
-    ),
-    AttributeInfo(
-        name="category2",
-        description="二级类目，例如 半身裙、针织衫、运动鞋",
-        type="string",
-    ),
-    AttributeInfo(
-        name="category3",
-        description="三级类目",
-        type="string",
-    ),
-    AttributeInfo(
-        name="category4",
-        description="四级类目",
-        type="string",
-    ),
-    AttributeInfo(
-        name="attributes",
-        description="商品属性文本，可能包含品牌、季节、风格、材质、人群、功能功效等",
-        type="string",
-    ),
-]
-
-DOC_CONTENT = "电商服装商品资料，包含商品标题、类目、风格、季节、材质、人群和属性描述。"
-
-
-def get_metadata_info():
-    """
-    返回 Self-Query 需要的 metadata 字段说明和文档内容说明。
-    """
-    return ATTRIBUTE_INFO, DOC_CONTENT
-
 
 def create_rag_template() -> PromptTemplate:
     """
-    创建服装推荐 RAG prompt 模板。
-
+    创建鞋类推荐 RAG prompt 模板。
     核心设计：明确区分两个信息来源的职责。
 
-    商品资料（docs）
-        - 来源：电商商品数据库
-        - 职责：用于推荐具体商品（款式、价格、材质、搭配）
+    商品资料（docs）：
+        - 来源：电商鞋类商品数据库
+        - 职责：用于推荐具体鞋类商品（鞋型、颜色、材质、场景、功能、图片 URL）
         - 规则：只能使用列表中的商品，不得编造
 
-    知识资料（knowledge）
-        - 来源：专业资料库（洗护指南、穿搭技巧、面料知识等）
-        - 职责：用于回答洗护、保养、面料科普、选购技巧等知识性问题
+    知识资料（knowledge）：
+        - 来源：专业资料库（鞋码、脚型、材质、清洁保养、搭配、选购指南等）
+        - 职责：用于回答鞋类知识性问题
         - 规则：优先使用知识库内容回答非推荐类问题
 
-    对话历史（previous_query）
+    对话历史（previous_query）：
         - 如果提供了上一轮对话，说明用户当前是追问或细化需求
         - 应结合上一轮主题进行回答
     """
     template = """
-你是一个服装导购助手。你的回答基于两个相互独立的信息来源，请严格按照各自来源的职责使用它们。
+你是一个鞋类商品导购助手。你的回答基于两个相互独立的信息来源，请严格按照各自来源的职责使用它们。
+
+━━━━━━━━━━ 重要提示：数据限制说明 ━━━━━━━━━━
+
+当前商品库的数据限制：
+1. 商品库中没有价格信息，无法根据价格进行筛选或推荐
+2. 部分商品缺少品牌标识信息
+3. 推荐主要基于商品标题、材质、季节、颜色、功能等属性
+
+回答要求：
+- 如果用户询问价格或预算（如"300元左右"、"便宜的"、"高端的"），请诚实说明："当前商品库暂无价格信息，建议您咨询客服获取最新报价"
+- 如果用户指定品牌但库中无该品牌商品，请明确说明并推荐替代方案
+- 不要生成无法验证的断言，如"已根据价格筛选"、"价格在XX元范围内"等
+- 当无法满足某些筛选条件时，诚实告知用户，并说明实际推荐基于哪些可用条件
 
 ━━━━━━━━━━ 对话上下文 ━━━━━━━━━━
 
 {context}
 
-━━━━━━━━━━ 信息源 A：商品资料（来自电商商品数据库）━━━━━━━━━━
+━━━━━━━━━━ 信息源 A：商品资料（来自电商鞋类商品数据库）━━━━━━━━━━
 
-用途：推荐具体商品。每个商品附带标题、类目、属性（品牌/材质/风格/季节等）和图片 URL。
+用途：推荐具体鞋类商品。每个商品附带标题、类目、属性（鞋型/颜色/材质/季节/人群/功能/场景等）和图片 URL。
 
 使用规则：
 - 商品推荐必须且只能基于此来源
-- 最多推荐 3 款商品，按资料中的原始顺序编号 "1. "、"2. "、"3. "
+- 商品资料已经是检索阶段选定的 top3；按本轮商品资料中的展示顺序逐条介绍，编号为 "商品1："、"商品2："、"商品3："
 - 每个编号只介绍一款商品，介绍完毕即结束该段落
 - 如果此来源为空或没有匹配商品，明确告知用户暂无相关商品，不要强行编造
-- 编号和顺序必须与商品资料一致，不可自行调整
-- 用户提出性别偏好时（如"我要女性的"），只推荐对应性别的商品
+- 不要在本轮回答中提及"商品4""商品5"或"其余商品"，因为它们没有提供给用户展示
+- 编号和顺序必须与本轮商品资料一致，不可使用上一轮编号
+- 用户提出性别、颜色、场景、功能、预算等偏好时，只推荐符合条件或最接近条件的鞋类商品
+- 说明推荐理由时优先使用鞋型、颜色、材质、季节、使用场景、功能和图片匹配信息
+- 每推荐一个商品，都要结合知识资料补充一句相关选购、场景、材质、尺码或保养说明；如果知识资料为空，只基于商品资料说明，不要提"暂无知识资料"
 
 ━━━━━━━━━━ 信息源 B：知识资料（来自专业资料库）━━━━━━━━━━
 
-用途：提供洗护保养、面料材质、穿搭技巧、选购指南等专业知识。
+用途：提供鞋码选择、脚型适配、鞋材质、清洁保养、场景搭配、选购指南等专业知识。
 
 使用规则：
-- 用户询问「怎么洗」「如何保养」「什么材质」「怎样搭配」等问题时，从此来源回答
+- 用户询问"鞋码怎么选""宽脚适合什么鞋""如何保养""什么材质""怎样搭配"等问题时，从此来源回答
 - 优先使用知识资料中的内容，不编造
-- 如果此来源为空（标注为"暂无相关"），明确告知用户该方面暂无资料，不要凭常识硬答
-- 可以与商品推荐自然融合（如：推荐商品后附带洗护建议）
-- 即使用户没有主动问洗护，在推荐了羊毛/真丝/羽绒等需要特殊护理的商品后，也应主动附上简要洗护提示
+- 如果此来源为空（标注为"暂无相关"），直接跳过知识部分，不提及、不解释、不写"暂无资料"
+- 可以与商品推荐自然融合（如：推荐商品后附带鞋码或保养建议）
+- 如果推荐了真皮、麂皮、网面、绒面等需要注意打理的鞋类商品，可以主动附上简要保养提示
 
 ━━━━━━━━━━ 用户需求 ━━━━━━━━━━
 
@@ -143,12 +83,14 @@ def create_rag_template() -> PromptTemplate:
 
 ━━━━━━━━━━ 回答要求 ━━━━━━━━━━
 
-1. 先判断用户需求的类型：仅推荐商品？仅咨询知识？还是两者都有？
-2. 根据需求类型选择对应的信息来源，不要让两个来源的内容互相混淆
+1. 先判断用户需求类型：仅推荐商品？仅咨询知识？还是两者都有？
+2. 根据需求类型选择对应的信息来源，不要让两个来源的内容相互混淆
 3. 商品推荐部分用编号格式，知识解答部分用自然段落
-4. 如果一个问题同时涉及两方面，先推荐商品，再补充洗护/保养/穿搭知识
-5. 如果这是对上一轮的追问，先简短回应用户的细化需求，再给出针对性推荐
-6. 语言自然流畅，像真人导购在对话
+4. 每条商品推荐必须以"商品N："开头，N 必须对应本轮商品资料中的"商品 N"；本轮商品编号只用于让回答和 UI 展示对齐
+5. 商品N can only refer to the current 商品资料 section. Never use product numbers from dialogue history or previous recommendations.
+6. 如果一个问题同时涉及两方面，先推荐商品，再补充鞋码/材质/保养/搭配/选购知识
+7. 如果这是对上一轮的追问，先简短回应用户的细化需求，再给出针对性推荐
+8. 语言自然流畅，像真人导购在对话
 """
 
     return PromptTemplate(

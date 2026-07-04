@@ -15,17 +15,32 @@ class RecState(TypedDict, total=False):
     # 上一轮对话的 query，用于理解追问（如"我要女性的"）
     previous_query: str
 
-    # 主题判断结果：Yes 表示和服装相关，No 表示不相关
+    # 主题判断结果：Yes 表示和鞋类商品相关，No 表示不相关
     on_topic: Literal["Yes", "No"]
 
     # 意图分析结果：是否需要商品推荐
     need_products: bool
 
-    # 意图分析结果：是否需要知识库资料（洗护、保养、面料等）
+    # 意图分析结果：是否需要知识库资料（鞋码、材质、保养、选购等）
     need_knowledge: bool
 
     # 意图分析的原始说明（LLM 输出的解释文本，用于日志和调试）
     intent_analysis: str
+
+    # LLM 输出的商品检索结构化过滤条件，由规则层再做兜底校验
+    product_filters: dict[str, Any]
+
+    # Whether the current user turn should inherit prior shopping context.
+    context_mode: Literal["follow_up", "clarification", "new_request"]
+
+    # Current shopping task state. Reserved for structured constraints/preferences.
+    active_intent: dict[str, Any]
+
+    # Recent product groups that were actually returned to the UI.
+    recent_recommendations: list[dict[str, Any]]
+
+    # Long-lived soft preferences. Must not be used as hard filters.
+    user_preferences: dict[str, Any]
 
     # 最终返回给用户的推荐回答
     recommendation: str
@@ -39,11 +54,17 @@ class RecState(TypedDict, total=False):
     # 检索到的原始文档信息，用于展示标题、图片、类目等 metadata
     documents: list[dict[str, Any]]
 
+    # 上一轮实际返回给前端展示的商品摘要，用于理解"上一轮白色的"等指代
+    last_recommended_products: list[dict[str, Any]]
+
+    # 已推荐商品的ID列表，用于避免多轮对话中重复推荐相同商品
+    recommended_product_ids: list[str]
+
     # 商品检索状态：success 表示检索到商品，empty 表示没有，skipped 表示无需检索
     retrieval_state: Literal["success", "empty", "skipped"]
 
-    # 商品检索来源：chroma 表示向量库检索，hybrid 表示混合检索，none 表示未检索或无结果
-    retrieval_source: Literal["chroma", "hybrid", "none"]
+    # 商品检索来源：milvus_text 表示向量库检索，hybrid 表示混合检索，none 表示未检索或无结果
+    retrieval_source: Literal["milvus_text", "hybrid", "none"]
 
     # 知识库检索状态：success / empty / skipped
     knowledge_retrieval_state: Literal["success", "empty", "skipped"]

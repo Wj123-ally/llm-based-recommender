@@ -1,0 +1,200 @@
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.25
+    container_name: recommender-etcd
+    command: >
+      etcd
+      --advertise-client-urls=http://etcd:2379
+      --listen-client-urls=http://0.0.0.0:2379
+      --data-dir=/etcd
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      - etcd_data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - recommender-net
+
+  minio:
+    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    container_name: recommender-minio
+    command: minio server /minio_data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio_data:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - recommender-net
+
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    container_name: recommender-milvus
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      COMMON_SECURITY_AUTHORIZATION_ENABLED: "false"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    ports:
+      - "${MILVUS_PORT:-19530}:19530"
+      - "${MILVUS_METRICS_PORT:-9091}:9091"
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - recommender-net
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: llm-based-recommender:latest
+    container_name: recommender-api
+    command: api
+    environment:
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
+      DASHSCOPE_CHAT_MODEL: ${DASHSCOPE_CHAT_MODEL:-qwen-plus}
+      DASHSCOPE_EMBEDDING_MODEL: ${DASHSCOPE_EMBEDDING_MODEL:-text-embedding-v4}
+      TEXT_EMBEDDING_PROVIDER: ${TEXT_EMBEDDING_PROVIDER:-bge}
+      TEXT_EMBEDDING_DEVICE: ${TEXT_EMBEDDING_DEVICE:-cpu}
+      BGE_TEXT_MODEL_PATH: /app/src/models/bge-m3
+      CROSS_ENCODER_MODEL_NAME: /app/src/models/bge-reranker-v2-m3
+      MILVUS_URI: http://milvus:19530
+      MILVUS_TEXT_COLLECTION_NAME: ${MILVUS_TEXT_COLLECTION_NAME:-product_collection}
+      MILVUS_IMAGE_COLLECTION_NAME: ${MILVUS_IMAGE_COLLECTION_NAME:-product_image_collection}
+      MILVUS_KNOWLEDGE_COLLECTION_NAME: ${MILVUS_KNOWLEDGE_COLLECTION_NAME:-knowledge_base_collection}
+      DENSE_RETRIEVER_TOP_K: ${DENSE_RETRIEVER_TOP_K:-20}
+      DENSE_SIMILARITY_THRESHOLD: ${DENSE_SIMILARITY_THRESHOLD:-0.2}
+      BM25_RETRIEVER_TOP_K: ${BM25_RETRIEVER_TOP_K:-20}
+      BM25_MIN_SCORE: ${BM25_MIN_SCORE:-0}
+      RERANK_TOP_N: ${RERANK_TOP_N:-5}
+      RRF_K: ${RRF_K:-60}
+      CLIP_LOCAL_FILES_ONLY: ${CLIP_LOCAL_FILES_ONLY:-true}
+      ENABLE_MULTIMODAL_RETRIEVER: ${ENABLE_MULTIMODAL_RETRIEVER:-false}
+      BOOTSTRAP: ${BOOTSTRAP:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ./config.py:/app/config.py
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+      - ./src/models:/app/src/models:ro
+      - ./src/database:/app/src/database
+      - ./src/indexing/indexes:/app/src/indexing/indexes
+      - ./src/indexing/data:/app/src/indexing/data
+      - ./uploads:/app/uploads
+      - hf_cache:/app/.cache/huggingface
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      milvus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+    networks:
+      - recommender-net
+
+  ui:
+    image: llm-based-recommender:latest
+    container_name: recommender-ui
+    command: ui
+    environment:
+      API_URL: http://api:8000
+    volumes:
+      - ./config.py:/app/config.py
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+      - ./src/models:/app/src/models:ro
+      - ./src/database:/app/src/database
+      - ./src/indexing/indexes:/app/src/indexing/indexes
+      - ./src/indexing/data:/app/src/indexing/data
+      - ./uploads:/app/uploads
+      - hf_cache:/app/.cache/huggingface
+    ports:
+      - "${UI_PORT:-8501}:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - recommender-net
+
+  admin:
+    image: llm-based-recommender:latest
+    container_name: recommender-admin
+    command: admin
+    environment:
+      API_URL: http://api:8000
+    volumes:
+      - ./config.py:/app/config.py
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+      - ./src/models:/app/src/models:ro
+      - ./src/database:/app/src/database
+      - ./src/indexing/indexes:/app/src/indexing/indexes
+      - ./src/indexing/data:/app/src/indexing/data
+      - ./uploads:/app/uploads
+      - hf_cache:/app/.cache/huggingface
+    ports:
+      - "${ADMIN_PORT:-8502}:8502"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8502/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - recommender-net
+
+volumes:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  hf_cache:
+
+networks:
+  recommender-net:
+    name: recommender-net

@@ -37,9 +37,14 @@ class ProductRepo:
         columns = [
             "id", "title", "image_url",
             "category_l1", "category_l2", "category_l3", "category_l4",
-            "price", "brand", "material", "season", "style", "color",
-            "gender", "rating", "sales_count", "stock_status",
-            "attributes_raw", "content_text",
+            "source_dataset", "description",
+            "brand", "material", "season", "style", "color",
+            "shoe_type", "heel_type", "closure_type", "gender",
+            "target_user", "usage_scene", "functionality",
+            "text_color", "image_color", "color_source",
+            "color_confidence", "color_conflict", "color_detail", "tags",
+            "rating", "sales_count", "stock_status",
+            "attributes_raw", "attributes_json", "raw_json", "content_text",
         ]
 
         placeholders = ", ".join(["?"] * len(columns))
@@ -61,9 +66,14 @@ class ProductRepo:
         columns = [
             "id", "title", "image_url",
             "category_l1", "category_l2", "category_l3", "category_l4",
-            "price", "brand", "material", "season", "style", "color",
-            "gender", "rating", "sales_count", "stock_status",
-            "attributes_raw", "content_text",
+            "source_dataset", "description",
+            "brand", "material", "season", "style", "color",
+            "shoe_type", "heel_type", "closure_type", "gender",
+            "target_user", "usage_scene", "functionality",
+            "text_color", "image_color", "color_source",
+            "color_confidence", "color_conflict", "color_detail", "tags",
+            "rating", "sales_count", "stock_status",
+            "attributes_raw", "attributes_json", "raw_json", "content_text",
         ]
         set_clause = ", ".join(f"{col}=excluded.{col}" for col in columns if col != "id")
         placeholders = ", ".join(["?"] * len(columns))
@@ -112,8 +122,6 @@ class ProductRepo:
         self,
         category_l1: Optional[str] = None,
         category_l2: Optional[str] = None,
-        price_min: Optional[float] = None,
-        price_max: Optional[float] = None,
         brand: Optional[str] = None,
         material: Optional[str] = None,
         season: Optional[str] = None,
@@ -138,12 +146,6 @@ class ProductRepo:
         if category_l2:
             conditions.append("category_l2 = ?")
             params.append(category_l2)
-        if price_min is not None:
-            conditions.append("price >= ?")
-            params.append(price_min)
-        if price_max is not None:
-            conditions.append("price <= ?")
-            params.append(price_max)
         if brand:
             conditions.append("brand = ?")
             params.append(brand)
@@ -185,8 +187,6 @@ class ProductRepo:
     def filter_by_ids(
         self,
         product_ids: list[str],
-        price_min: Optional[float] = None,
-        price_max: Optional[float] = None,
         brand: Optional[str] = None,
         material: Optional[str] = None,
         season: Optional[str] = None,
@@ -209,12 +209,6 @@ class ProductRepo:
         conditions = [f"p.id IN ({placeholders})"]
         params: list[Any] = list(product_ids)
 
-        if price_min is not None:
-            conditions.append("p.price >= ?")
-            params.append(price_min)
-        if price_max is not None:
-            conditions.append("p.price <= ?")
-            params.append(price_max)
         if brand:
             conditions.append("p.brand = ?")
             params.append(brand)
@@ -255,22 +249,3 @@ class ProductRepo:
                 if row[level]:
                     cats[f"{level}:{row[level]}"] = row["cnt"]
         return cats
-
-    def get_price_stats(self) -> dict[str, float]:
-        """价格分布统计。"""
-        rows = self.conn.execute(
-            "SELECT price FROM products WHERE price IS NOT NULL ORDER BY price"
-        ).fetchall()
-        prices = [r["price"] for r in rows]
-
-        if not prices:
-            return {"count": 0}
-
-        mid = len(prices) // 2
-        return {
-            "count": len(prices),
-            "min": min(prices),
-            "max": max(prices),
-            "avg": round(sum(prices) / len(prices), 2),
-            "median": prices[mid],
-        }

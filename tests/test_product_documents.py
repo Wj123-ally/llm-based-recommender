@@ -30,7 +30,7 @@ class TestChineseTokenizer:
 
     def test_simple_chinese(self):
         """简单中文应正确分词。"""
-        tokens = chinese_tokenize("红色长袖连衣裙")
+        tokens = chinese_tokenize("红色运动鞋")
         assert isinstance(tokens, list)
         assert len(tokens) >= 1
         assert all(t.strip() for t in tokens)
@@ -48,7 +48,7 @@ class TestChineseTokenizer:
 
     def test_punctuation_removed(self):
         """标点符号应被过滤。"""
-        tokens = chinese_tokenize("推荐！！夏天穿的。。。裙子～～")
+        tokens = chinese_tokenize("推荐！！夏天穿的。。。凉鞋～～")
         assert all(t.strip() for t in tokens)
 
     def test_empty_text(self):
@@ -71,7 +71,7 @@ class TestBuildProductContent:
             "商品标题": "夏季纯棉T恤",
             "商品大类": "女装",
             "商品类别": "T恤",
-            "商品属性": "品牌:优衣库,,材质:纯棉,,季节:夏季",
+            "商品属性": "品牌:耐克,,材质:网面,,季节:夏季",
         }
         content = build_product_content(metadata)
         assert "夏季纯棉T恤" in content

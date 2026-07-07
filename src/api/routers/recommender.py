@@ -36,7 +36,7 @@ def recommend(
     thread_id: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
     """
-    服装推荐接口。
+    鞋类商品推荐接口（非流式）。
     """
     if graph_app is None:
         raise HTTPException(status_code=503, detail="推荐服务暂时不可用")
@@ -69,3 +69,5 @@ def recommend(
     except Exception as exc:
         logger.exception("推荐流程执行失败")
         raise HTTPException(status_code=500, detail="推荐流程执行失败") from exc
+
+

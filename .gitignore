@@ -13,5 +13,13 @@ venv/
 src/indexing/indexes/
 src/indexing/data/
 
+# 模型文件（过大，应从外部下载）
+src/models/bge-m3/
+src/models/bge-reranker-v2-m3/
+src/models/bge-visualized/
+
+# 数据库文件
+*.db
+
 # 运行时产生的聊天记录
 src/ui/chat_memory.json

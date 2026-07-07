@@ -1,0 +1,14 @@
+services:
+  milvus:
+    image: ${MILVUS_GPU_IMAGE:-milvusdb/milvus:v2.4.15-gpu}
+    gpus: all
+    environment:
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+
+  api:
+    build:
+      args:
+        TORCH_EXTRA_INDEX_URL: ${TORCH_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu126}
+    environment:
+      TEXT_EMBEDDING_DEVICE: cuda
+    gpus: all

@@ -5,7 +5,7 @@ from src.api.routers.recommender import router as recommender_router
 
 
 app = FastAPI(
-    title="Chinese Fashion Recommender API",
+    title="AI Shoe Recommender API",
     version="1.0",
 )
 
@@ -19,7 +19,7 @@ def root() -> dict[str, str]:
     """
     根路径欢迎信息。
     """
-    return {"message": "Welcome to Chinese Fashion Recommender API"}
+    return {"message": "Welcome to AI Shoe Recommender API"}
 
 
 @app.get("/health")

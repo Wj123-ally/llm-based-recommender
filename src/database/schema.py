@@ -21,33 +21,70 @@ CREATE TABLE IF NOT EXISTS products (
     category_l2     TEXT,
     category_l3     TEXT,
     category_l4     TEXT,
-    price           REAL,
+    source_dataset  TEXT,
+    description     TEXT,
     brand           TEXT,
     material        TEXT,
     season          TEXT,
     style           TEXT,
     color           TEXT,
+    shoe_type       TEXT,
+    heel_type       TEXT,
+    closure_type    TEXT,
     gender          TEXT,
+    target_user     TEXT,
+    usage_scene     TEXT,
+    functionality   TEXT,
+    text_color      TEXT,
+    image_color     TEXT,
+    color_source    TEXT,
+    color_confidence TEXT,
+    color_conflict  INTEGER,
+    color_detail    TEXT,
+    tags            TEXT,
     rating          REAL,
     sales_count     INTEGER,
     stock_status    TEXT    DEFAULT '有货',
     attributes_raw  TEXT,
+    attributes_json TEXT,
+    raw_json        TEXT,
     content_text    TEXT    NOT NULL,
     created_at      TEXT    DEFAULT (datetime('now')),
     updated_at      TEXT    DEFAULT (datetime('now'))
 );
 """
 
+PRODUCT_COLUMN_DEFINITIONS = {
+    "source_dataset": "TEXT",
+    "description": "TEXT",
+    "shoe_type": "TEXT",
+    "heel_type": "TEXT",
+    "closure_type": "TEXT",
+    "target_user": "TEXT",
+    "usage_scene": "TEXT",
+    "functionality": "TEXT",
+    "text_color": "TEXT",
+    "image_color": "TEXT",
+    "color_source": "TEXT",
+    "color_confidence": "TEXT",
+    "color_conflict": "INTEGER",
+    "color_detail": "TEXT",
+    "tags": "TEXT",
+    "attributes_json": "TEXT",
+    "raw_json": "TEXT",
+}
+
 CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_products_category_l1 ON products(category_l1);",
     "CREATE INDEX IF NOT EXISTS idx_products_category_l2 ON products(category_l2);",
-    "CREATE INDEX IF NOT EXISTS idx_products_price ON products(price);",
     "CREATE INDEX IF NOT EXISTS idx_products_rating ON products(rating DESC);",
     "CREATE INDEX IF NOT EXISTS idx_products_season ON products(season);",
     "CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand);",
     "CREATE INDEX IF NOT EXISTS idx_products_material ON products(material);",
     "CREATE INDEX IF NOT EXISTS idx_products_gender ON products(gender);",
     "CREATE INDEX IF NOT EXISTS idx_products_stock ON products(stock_status);",
+    "CREATE INDEX IF NOT EXISTS idx_products_shoe_type ON products(shoe_type);",
+    "CREATE INDEX IF NOT EXISTS idx_products_color_confidence ON products(color_confidence);",
 ]
 
 CREATE_FTS_TABLE = """
@@ -85,6 +122,18 @@ CREATE_FTS_TRIGGERS = [
     """,
 ]
 
+
+def _ensure_product_columns(cursor) -> None:
+    existing_columns = {
+        row[1]
+        for row in cursor.execute("PRAGMA table_info(products)").fetchall()
+    }
+
+    for column_name, definition in PRODUCT_COLUMN_DEFINITIONS.items():
+        if column_name not in existing_columns:
+            cursor.execute(f"ALTER TABLE products ADD COLUMN {column_name} {definition}")
+
+
 def init_db() -> None:
     """
     初始化数据库：建表 + 索引 + FTS5。
@@ -96,6 +145,7 @@ def init_db() -> None:
 
     logger.info("创建 products 主表 ...")
     cursor.execute(CREATE_PRODUCTS_TABLE)
+    _ensure_product_columns(cursor)
 
     logger.info("创建索引 ...")
     for index_sql in CREATE_INDEXES:

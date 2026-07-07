@@ -1,0 +1,6 @@
+services:
+  milvus:
+    image: ${MILVUS_GPU_IMAGE:-milvusdb/milvus:v2.4.15-gpu}
+    gpus: all
+    environment:
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}

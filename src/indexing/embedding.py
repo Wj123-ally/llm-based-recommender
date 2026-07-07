@@ -1,138 +1,22 @@
-from pathlib import Path
-import os
 import pickle
-import shutil
 import sys
-from typing import Optional
-
-import pandas as pd
+from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config import (
-    BM25_INDEX_PATH,
-    CHROMA_COLLECTION_NAME,
-    CHROMA_INDEX_PATH,
-    DASHSCOPE_EMBEDDING_MODEL,
-    FAISS_INDEX_PATH,
-    PROCESSED_DATA_PATH,
-    RAW_DATA_PATH,
-)
-from src.retriever.product_documents import build_product_content, chinese_tokenize
-
-
-def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    清洗列名。
-    """
-    rename_dict = {
-        "title": "商品标题",
-        "image_url": "商品图片",
-        "industry": "商品领域",
-        "category1": "商品大类",
-        "category2": "商品类别",
-        "category3": "商品子类",
-        "category4": "商品细分类",
-        "attributes": "商品属性",
-    }
-
-    return df.rename(columns={k: v for k, v in rename_dict.items() if k in df.columns})
-
-
-def load_and_preprocess_data(n_samples: Optional[int] = 2000) -> pd.DataFrame:
-    """
-    加载并预处理原始数据。
-
-    主要步骤：
-    1. 检查原始 CSV 是否存在
-    2. 读取 CSV
-    3. 清洗列名
-    4. 只保留推荐系统需要的字段
-    5. 删除空值
-    6. 可选抽样
-    7. 保存处理后的 CSV
-    """
-    if not RAW_DATA_PATH.exists():
-        raise FileNotFoundError(f"Dataset not found at {RAW_DATA_PATH}")
-
-    df = pd.read_csv(RAW_DATA_PATH, encoding="utf-8-sig")
-
-    df = clean_column_names(df)
-
-    valid_columns = [
-        "id",
-        "商品标题",
-        "商品图片",
-        "商品领域",
-        "商品大类",
-        "商品类别",
-        "商品子类",
-        "商品细分类",
-        "商品属性",
-    ]
-    df = df[[col for col in valid_columns if col in df.columns]]
-    df.dropna(subset=["商品标题"], inplace=True)
-    df.fillna("", inplace=True)
-
-    if n_samples and n_samples < len(df):
-        df = df.sample(n_samples, random_state=42)
-
-    PROCESSED_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(PROCESSED_DATA_PATH, index=False, encoding="utf-8-sig")
-
-    return df
-
-
-def generate_documents(use_csv_loader: bool = False) -> list:
-    """
-    把处理后的 CSV 数据转换成 LangChain Document。
-
-    Document 可以理解成 LangChain 的标准资料格式：
-    - page_content：主要文本内容，用于向量化和喂给大模型
-    - metadata：结构化字段，用于过滤、排序、辅助检索
-    """
-    if use_csv_loader:
-        from langchain_community.document_loaders import CSVLoader
-
-        loader = CSVLoader(str(PROCESSED_DATA_PATH), encoding="utf-8-sig")
-        return loader.load()
-
-    from langchain_core.documents import Document
-
-    df = pd.read_csv(PROCESSED_DATA_PATH, encoding="utf-8-sig")
-
-    documents = []
-    for index, row in df.iterrows():
-        metadata = row.to_dict()
-        product_id = str(metadata.get("id") or index)
-        documents.append(
-            Document(
-                page_content=build_product_content(metadata),
-                metadata=metadata,
-                id=product_id,
-            )
-        )
-
-    return documents
-
+import config as settings  # noqa: E402
+from config import BM25_INDEX_PATH  # noqa: E402
+from src.retriever.product_documents import build_product_content, chinese_tokenize  # noqa: E402
+from src.retriever.milvus_store import count_collection, reset_collection, upsert_documents  # noqa: E402
 
 def generate_documents_from_db() -> list:
-    """
-    从 SQLite 数据库读取商品数据，转换成 LangChain Document。
-
-    优先使用此函数 —— 数据库中的商品已包含价格/品牌/材质等增强字段。
-    """
     from langchain_core.documents import Document
     from src.database.product_repo import ProductRepo
 
     repo = ProductRepo()
-    conn = repo.conn
-
-    rows = conn.execute(
-        "SELECT * FROM products ORDER BY id"
-    ).fetchall()
+    rows = repo.conn.execute("SELECT * FROM products ORDER BY id").fetchall()
 
     documents = []
     for row in rows:
@@ -151,82 +35,44 @@ def generate_documents_from_db() -> list:
 
 
 def initialize_embeddings_model():
-    """
-    初始化 DashScope embedding 模型。
-
-    embedding 模型的作用：
-    把文本转换成向量。
-
-    例如：
-    "红色连衣裙"
-    -> [0.12, -0.08, 0.33, ...]
-
-    后续 FAISS 和 Chroma 都需要用这个模型生成向量。
-    """
     from src.shared import create_embedding_model
 
     return create_embedding_model()
 
 
-def create_faiss_index(embeddings, documents: list) -> None:
-    """
-    创建并保存 FAISS 向量索引。
-    """
-    from langchain_community.vectorstores import FAISS
+def create_milvus_text_index(embeddings, documents: list) -> None:
+    batch_size = 100
+    total = len(documents)
+    if not documents:
+        return
 
-    faiss_index = FAISS.from_documents(documents, embeddings)
-    faiss_index.save_local(str(FAISS_INDEX_PATH))
+    first_vector = embeddings.embed_documents([documents[0].page_content])[0]
+    reset_collection(settings.MILVUS_TEXT_COLLECTION_NAME, len(first_vector))
+    upsert_documents(
+        settings.MILVUS_TEXT_COLLECTION_NAME,
+        [documents[0]],
+        [first_vector],
+    )
+    print(f"  Milvus write progress: 1/{total}")
 
+    for start in range(0, total, batch_size):
+        if start == 0:
+            start = 1
+        end = min(start + batch_size, total)
+        batch = documents[start:end]
+        if not batch:
+            continue
+        contents = [doc.page_content for doc in batch]
+        vectors = embeddings.embed_documents(contents)
+        upsert_documents(settings.MILVUS_TEXT_COLLECTION_NAME, batch, vectors)
+        print(f"  Milvus write progress: {end}/{total}")
 
-def create_chroma_index(embeddings, documents: list) -> None:
-    """
-    创建并保存 Chroma 向量库。
-
-    注意：只重建商品 collection，不删除知识库 collection。
-    如果知识库 collection 存在，会被保留。
-    """
-    try:
-        from langchain_chroma import Chroma
-    except ImportError:
-        from langchain_community.vectorstores import Chroma
-
-    # 先打开现有 vector store，只删除商品 collection
-    if CHROMA_INDEX_PATH.exists():
-        try:
-            existing = Chroma(
-                collection_name=CHROMA_COLLECTION_NAME,
-                embedding_function=embeddings,
-                persist_directory=str(CHROMA_INDEX_PATH),
-            )
-            existing.delete_collection()
-        except Exception:
-            pass
-
-    vector_store = Chroma(
-        collection_name=CHROMA_COLLECTION_NAME,
-        embedding_function=embeddings,
-        persist_directory=str(CHROMA_INDEX_PATH),
+    print(
+        "  Milvus collection count: "
+        f"{count_collection(settings.MILVUS_TEXT_COLLECTION_NAME)}"
     )
 
-    # Chroma 写入分批：每批 500 条，避免 embedding API 单次包太大超时
-    BATCH_SIZE = 500
-    total = len(documents)
-    for start in range(0, total, BATCH_SIZE):
-        end = min(start + BATCH_SIZE, total)
-        batch = documents[start:end]
-        # ids 参数帮助 Chroma 去重写入
-        batch_ids = [doc.metadata.get("id", f"prod_{start+i}") for i, doc in enumerate(batch)]
-        vector_store.add_documents(batch, ids=batch_ids)
-        print(f"  Chroma 写入进度: {end}/{total}")
-
-    if hasattr(vector_store, "persist"):
-        vector_store.persist()
-
-
 def create_bm25_index(documents: list) -> None:
-    """
-    创建并保存 BM25 关键词索引。
-    """
     BM25_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     bm25_index = {
@@ -238,77 +84,24 @@ def create_bm25_index(documents: list) -> None:
         "tokenizer": "jieba_or_cjk_fallback",
     }
 
-    with open(BM25_INDEX_PATH, "wb") as f:
-        pickle.dump(bm25_index, f)
+    with open(BM25_INDEX_PATH, "wb") as file:
+        pickle.dump(bm25_index, file)
 
 
-def embedding_pipeline(
-    n_samples: Optional[int] = 100,
-    from_db: bool = False,
-) -> None:
-    """
-    整个离线索引构建流程的入口函数。
+def embedding_pipeline() -> None:
+    documents = generate_documents_from_db()
+    print(f"[1/4] Loaded {len(documents)} product documents from SQLite")
 
-    完整流程：
-    1. 如果原始 CSV 不存在，则从 Hugging Face Datasets 下载数据
-    2. 加载并预处理数据（或从 SQLite 读取增强数据）
-    3. 把商品数据转换成 Document
-    4. 初始化 DashScope embedding 模型
-    5. 创建 Chroma 向量索引（稠密检索）
-    6. 创建 BM25 关键词索引（稀疏检索）
+    print("[2/4] Initializing text embedding model")
+    embeddings = initialize_embeddings_model()
 
-    Args:
-        n_samples: 采样条数（from_db=False 时生效）
-        from_db: True 时从 SQLite 读取增强后商品数据
-    """
-    try:
-        if from_db:
-            print("[3/6] 从 SQLite 数据库读取商品...")
-            documents = generate_documents_from_db()
-            print(f"  共生成 {len(documents)} 条 Document")
+    print("[3/4] Building Milvus text index")
+    create_milvus_text_index(embeddings, documents)
 
-            print("[4/6] 初始化 embedding 模型...")
-            embeddings = initialize_embeddings_model()
+    print("[4/4] Building BM25 text index")
+    create_bm25_index(documents)
+    print("Embedding pipeline completed successfully.")
 
-            print("[5/6] 创建 Chroma 向量索引（调用 DashScope embedding API，请耐心等待）...")
-            create_chroma_index(embeddings, documents)
-            print("  Chroma 索引创建完成")
-
-            print("[6/6] 创建 BM25 关键词索引...")
-            create_bm25_index(documents)
-            print("  BM25 索引创建完成")
-
-            print("Embedding pipeline completed successfully (from DB).")
-            return
-
-        if not RAW_DATA_PATH.exists():
-            from src.indexing.data_loader import download_data
-
-            print("[1/6] 下载原始数据...")
-            download_data()
-
-        print(f"[2/6] 加载并预处理数据 (n_samples={n_samples})...")
-        load_and_preprocess_data(n_samples)
-
-        print("[3/6] 转换为 LangChain Document...")
-        documents = generate_documents()
-        print(f"  共生成 {len(documents)} 条 Document")
-
-        print("[4/6] 初始化 embedding 模型...")
-        embeddings = initialize_embeddings_model()
-
-        print("[5/6] 创建 Chroma 向量索引（调用 DashScope embedding API，请耐心等待）...")
-        create_chroma_index(embeddings, documents)
-        print("  Chroma 索引创建完成")
-
-        print("[6/6] 创建 BM25 关键词索引...")
-        create_bm25_index(documents)
-        print("  BM25 索引创建完成")
-
-        print("Embedding pipeline completed successfully.")
-    except Exception as e:
-        print(f"Failed to run embedding pipeline: {e}")
-        raise
 
 if __name__ == "__main__":
-    embedding_pipeline(from_db=True)
+    embedding_pipeline()

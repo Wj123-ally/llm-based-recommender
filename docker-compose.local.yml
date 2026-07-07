@@ -1,0 +1,4 @@
+# Local deployment is now the default in docker-compose.yml.
+# This file is kept only for backward-compatible commands:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+services: {}

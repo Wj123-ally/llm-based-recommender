@@ -4,7 +4,7 @@
 负责：
 - 解析不同格式的上传文件（PDF、DOCX、TXT、MD）
 - 将文档切分为适合检索的文本块
-- 向量化并存入 Chroma 知识库专用 collection
+- 向量化并存入 Milvus 知识库专用 collection
 - 删除文件时清理对应索引
 
 设计原则：
@@ -12,28 +12,29 @@
 - 使用与商品检索相同的 embedding 模型，保持向量空间一致
 """
 
-import hashlib
 import logging
 from pathlib import Path
 from typing import Any
 
 from langchain_core.documents import Document
 
-from src.shared import create_chroma_collection
+from src.shared import (
+    create_embedding_model,
+    ensure_knowledge_collection,
+    get_knowledge_collection_name,
+)
 
 logger = logging.getLogger(__name__)
 
-# 知识库专用的 Chroma collection 名，与商品 collection 隔离
-KNOWLEDGE_COLLECTION_NAME = "knowledge_base_collection"
 # 文档分块大小（字符数）
 CHUNK_SIZE = 500
 # 分块之间的重叠字符数
 CHUNK_OVERLAP = 50
 
 
-def _get_knowledge_chroma():
-    """获取知识库专用 Chroma collection。"""
-    return create_chroma_collection(KNOWLEDGE_COLLECTION_NAME)
+def _get_embedding_model():
+    """获取文本 embedding 模型（单例缓存在 shared 层）。"""
+    return create_embedding_model()
 
 
 def _parse_file(file_path: Path) -> str:
@@ -134,14 +135,9 @@ def _chunk_text(text: str, file_id: str, filename: str) -> list[Document]:
     return chunks
 
 
-def _chunk_id_to_md5(chunk_id: str) -> str:
-    """将 chunk_id 转为 MD5 哈希，作为 Chroma 的 doc ID（Chroma 要求 ASCII 兼容）。"""
-    return hashlib.md5(chunk_id.encode("utf-8")).hexdigest()
-
-
 def index_file(file_path: Path, file_id: str, filename: str) -> int:
     """
-    解析文件、分块、向量化、写入知识库 Chroma collection。
+    解析文件、分块、向量化、写入知识库 Milvus collection。
 
     返回值：成功索引的文本块数量。
 
@@ -162,15 +158,31 @@ def index_file(file_path: Path, file_id: str, filename: str) -> int:
     chunks = _chunk_text(text, file_id, filename)
     logger.info("文件 %s 解析出 %s 个文本块", filename, len(chunks))
 
-    chroma = _get_knowledge_chroma()
-    ids = [_chunk_id_to_md5(chunk.metadata["chunk_id"]) for chunk in chunks]
+    # 获取 embedding 模型并计算向量
+    embedding_model = _get_embedding_model()
 
-    # 分批写入，每批 20 条，避免一次性写入过多
+    # 获取第一个向量的维度，确保 collection 已创建
+    first_vector = embedding_model.embed_documents([chunks[0].page_content])[0]
+    ensure_knowledge_collection(len(first_vector))
+
+    from src.retriever.milvus_store import upsert_documents
+
+    # 分批写入，每批 20 条
     batch_size = 20
     for start in range(0, len(chunks), batch_size):
         batch_chunks = chunks[start : start + batch_size]
-        batch_ids = ids[start : start + batch_size]
-        chroma.add_documents(documents=batch_chunks, ids=batch_ids)
+        batch_texts = [chunk.page_content for chunk in batch_chunks]
+        batch_vectors = embedding_model.embed_documents(batch_texts)
+
+        # 为每个 chunk 设置 doc id（Milvus 用 chunk_id 作为主键）
+        for chunk in batch_chunks:
+            chunk.id = chunk.metadata["chunk_id"]
+
+        upsert_documents(
+            get_knowledge_collection_name(),
+            batch_chunks,
+            batch_vectors,
+        )
 
     logger.info("文件 %s 索引完成，共 %s 块", filename, len(chunks))
     return len(chunks)
@@ -178,29 +190,44 @@ def index_file(file_path: Path, file_id: str, filename: str) -> int:
 
 def delete_file_index(file_id: str) -> int:
     """
-    删除某个 file_id 在知识库 Chroma collection 中的所有 chunk。
+    删除某个 file_id 在知识库 Milvus collection 中的所有 chunk。
 
     返回值：删除的文本块数量（可能为 0，表示该文件未被索引过）。
 
-    实现方式：用 Chroma 的 metadata 过滤查询所有属于该 file_id 的 chunk ID，
+    实现方式：通过 Milvus 的 filter 表达式查询所有属于该 file_id 的 chunk，
     然后批量删除。
     """
-    chroma = _get_knowledge_chroma()
+    from src.retriever.milvus_store import get_milvus_client
 
-    # 通过 metadata 过滤找到所有属于该文件的所有 chunk
+    client = get_milvus_client()
+    collection_name = get_knowledge_collection_name()
+
+    if not client.has_collection(collection_name):
+        logger.info("知识库 collection 不存在，无需清理")
+        return 0
+
     try:
-        results = chroma.get(where={"file_id": file_id})
+        # 查询所有属于该 file_id 的 chunk
+        results = client.query(
+            collection_name=collection_name,
+            filter=f'file_id == "{file_id}"',
+            output_fields=["id"],
+        )
     except Exception:
         logger.exception("查询知识库 collection 失败")
         return 0
 
-    chunk_ids = results.get("ids", [])
-    if not chunk_ids:
+    if not results:
         logger.info("文件 %s 没有可清理的索引记录", file_id)
         return 0
 
-    # Chroma 通过 ID 列表删除
-    chroma.delete(ids=chunk_ids)
+    chunk_ids = [item["id"] for item in results]
+    try:
+        client.delete(collection_name=collection_name, pks=chunk_ids)
+    except Exception:
+        logger.exception("删除知识库索引失败")
+        return 0
+
     logger.info("已从知识库索引中删除文件 %s 的 %s 个文本块", file_id, len(chunk_ids))
     return len(chunk_ids)
 
@@ -210,13 +237,14 @@ def get_knowledge_collection_stats() -> dict[str, Any]:
     返回知识库 collection 的统计信息。
     用于管理界面或健康检查。
     """
+    from src.retriever.milvus_store import count_collection
+
     try:
-        chroma = _get_knowledge_chroma()
-        count = chroma._collection.count()
+        count = count_collection(get_knowledge_collection_name())
         return {
-            "collection_name": KNOWLEDGE_COLLECTION_NAME,
+            "collection_name": get_knowledge_collection_name(),
             "chunk_count": count,
         }
     except Exception:
         logger.exception("读取知识库统计信息失败")
-        return {"collection_name": KNOWLEDGE_COLLECTION_NAME, "chunk_count": 0}
+        return {"collection_name": get_knowledge_collection_name(), "chunk_count": 0}

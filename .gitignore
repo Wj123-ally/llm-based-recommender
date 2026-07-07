@@ -9,6 +9,22 @@ uploads/
 venv/
 .venv/
 
+# IDE配置
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 测试缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# API测试工具
+.postman/
+postman/
+
 # 预构建索引和数据集（文件较大，不适合 Git 追踪）
 src/indexing/indexes/
 src/indexing/data/

@@ -1,8 +1,0 @@
-services:
-  api:
-    build:
-      args:
-        TORCH_EXTRA_INDEX_URL: ${TORCH_EXTRA_INDEX_URL:-https://download.pytorch.org/whl/cu126}
-    environment:
-      TEXT_EMBEDDING_DEVICE: cuda
-    gpus: all
